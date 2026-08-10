@@ -22,15 +22,17 @@ const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
 
 用法:
   afk <迭代次数>        在当前项目目录运行 AFK 循环（处理带 label 的开放 issue）
-  afk init              初始化：构建沙箱镜像、生成全局配置、检查凭据
+  afk init              初始化：构建沙箱镜像、生成全局配置、复制项目模板、检查凭据
   afk --help            显示帮助
 
 环境变量:
   DEEPSEEK_API_KEY      deepseek API key（必填）
-  GH_TOKEN              GitHub token（可选，未设置时用宿主 gh 登录凭据）
 
 配置:
   全局: ~/.afk/config.json（image / model / label / autoMerge）
+
+模板:
+  项目 .sandcastle/prompt.md（自定义，可提交 git）> 包内默认 prompts/prompt.md
 `
 
 // ---------------------------------------------------------------------------

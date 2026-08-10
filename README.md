@@ -81,19 +81,18 @@
 | gh CLI + 登录                 | GitHub issue / PR 操作  | `brew install gh && gh auth login`                     |
 | DEEPSEEK_API_KEY              | 沙箱内 agent 的模型凭据 | [platform.deepseek.com](https://platform.deepseek.com) |
 
-> 沙箱镜像需要能联网拉取模型（DeepSeek API 走宿主网络，无需额外配置）。
+> 沙箱内 agent 直接调用 DeepSeek API（`DEEPSEEK_API_KEY` 注入容器环境变量，容器联网即可，无需额外配置）。
 
 ---
 
 ## 安装
 
-```bash
-# 全局安装（提供 afk 命令）
-npm i -g @hacxy/pi-afk
+> ⚠️ 尚未发布 npm（见[路线图](#开发)），当前从源码安装：
 
-# 开发模式（从源码）
+```bash
 git clone https://github.com/hacxy/pi-afk.git
 cd pi-afk && pnpm install && pnpm build
+pnpm link --global        # 提供 afk 命令（开发模式）
 ```
 
 ---
@@ -133,10 +132,9 @@ afk 1
 
 ### 环境变量
 
-| 变量               | 必填 | 说明                                         |
-| ------------------ | ---- | -------------------------------------------- |
-| `DEEPSEEK_API_KEY` | ✅   | DeepSeek API key（注入沙箱供 agent 使用）    |
-| `GH_TOKEN`         | 可选 | GitHub token；未设置时用宿主 `gh` 的登录凭据 |
+| 变量               | 必填 | 说明                                      |
+| ------------------ | ---- | ----------------------------------------- |
+| `DEEPSEEK_API_KEY` | ✅   | DeepSeek API key（注入沙箱供 agent 使用） |
 
 ### 全局配置 `~/.afk/config.json`
 
@@ -229,7 +227,7 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 - **每次 issue 的沙箱日志**：`~/.afk/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）
 - **事件流**：`~/.afk/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
 
-事件类型：`run-start` / `iteration-start` / `issue-picked` / `issue-outcome` / `issue-commented` / `pull-request` / `issue-merged` / `no-more-tasks` / `error`。
+日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result` / `no-more-tasks` / `error`。
 
 ---
 
