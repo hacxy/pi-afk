@@ -115,7 +115,7 @@ afk 10        # 处理 10 个开放 issue（没有则立即结束）
 
 1. 生成全局配置 `~/.afk/config.json`（跨所有项目共享）
 2. 检查/构建沙箱镜像 `pi-afk:latest`（全局一次，所有项目复用）
-3. 向项目 `.gitignore` 追加 sandcastle 运行时产物忽略规则（幂等，`prompt.md` 可提交）
+3. 向项目 `.gitignore` 追加 sandcastle 运行时产物忽略规则（幂等，仅 `.sandcastle/.env` / `logs/` / `worktrees/` 三条，`prompt.md` 可提交）
 4. 幂等复制默认模板到项目 `.sandcastle/prompt.md`（已存在则跳过）
 5. 检查 DEEPSEEK_API_KEY，缺失则明确报错
 
@@ -219,6 +219,12 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 | 无 lockfile         | 复制宿主 node_modules，agent 自行处理                                                                                     |
 
 > pnpm store 是**可写**共享（pnpm 需写 sqlite 索引，实测只读会失败）。最坏情况是缓存损坏重新下载，非灾难。
+
+### 沙箱镜像与宿主对齐
+
+- **pnpm 版本**：构建镜像时自动注入宿主 `pnpm --version`（`ARG PNPM_VERSION` build-arg），沙箱内 pnpm 永远与宿主一致，不硬编码版本。
+- **UID/GID**：构建时注入宿主 `id -u` / `id -g`（sandcastle 预检要求）。
+- 宿主未安装 pnpm 时构建会明确报错（宁可失败也不静默漂移）。
 
 ---
 

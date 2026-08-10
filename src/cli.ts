@@ -17,6 +17,7 @@ import { requireDeepseekKey } from './credentials.js'
 import { appendLog } from './log.js'
 import { runAfkLoop, type LoopEvent } from './loop.js'
 import { ensureProjectPrompt, ensureSandcastleGitignore } from './prompts.js'
+import { dockerBuildArgs, hostPnpmVersion } from './sandbox.js'
 
 const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
 
@@ -66,21 +67,25 @@ function ensureImage(cfg: GlobalConfig): boolean {
   const dockerfile = dockerfilePath()
   const uid = process.getuid?.() ?? 1000
   const gid = process.getgid?.() ?? 1000
+  // pnpm 版本注入：构建产物永远与宿主一致（不硬编码）
+  let pnpmVersion: string
+  try {
+    pnpmVersion = hostPnpmVersion()
+  } catch (err) {
+    console.error(`✗ ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
   try {
     execFileSync(
       'docker',
-      [
-        'build',
-        '-t',
-        cfg.image,
-        '--build-arg',
-        `AGENT_UID=${uid}`,
-        '--build-arg',
-        `AGENT_GID=${gid}`,
-        '-f',
+      dockerBuildArgs({
+        image: cfg.image,
         dockerfile,
-        dirname(dockerfile),
-      ],
+        contextDir: dirname(dockerfile),
+        uid,
+        gid,
+        pnpmVersion,
+      }),
       { stdio: 'inherit' },
     )
     console.log(`✓ 镜像构建完成: ${cfg.image}`)
