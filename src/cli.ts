@@ -184,6 +184,22 @@ function printEvents(events: LoopEvent[]): void {
       case 'issue-commented':
         console.log(`  留言: ${e.reason}`)
         break
+      case 'issue-merged':
+        console.log(`  ✓ PR #${e.prNumber} 已合并，issue #${e.issue.number} 随之关闭`)
+        break
+      case 'pr-exists-merged':
+        console.log(`  ⏭ 已有已合并 PR #${e.prNumber}（issue #${e.issue.number}），本轮跳过`)
+        break
+      case 'pr-pending-manual-merge':
+        console.log(
+          `  ⏭ 已有 PR #${e.prNumber} 待人工合并（issue #${e.issue.number}），本轮跳过，不自动合并`,
+        )
+        break
+      case 'pr-conflict-skip':
+        console.warn(
+          `  ⏭ 已有 PR #${e.prNumber} 存在冲突（issue #${e.issue.number}），已留言，待人工解决`,
+        )
+        break
       case 'presync-conflict':
         console.warn(
           `  ⚠ 预同步冲突（issue #${e.issue.number}）: PR 已建并留言 ${e.files.length} 个冲突文件，待人工处理`,

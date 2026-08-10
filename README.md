@@ -37,23 +37,30 @@
 宿主（你的机器）                          沙箱（Docker 容器，零凭据）
 ─────────────────────                    ─────────────────────────────
 1. 拉取开放 issue（按配置 labels 过滤；未配置 = 不过滤全部拉取）
-2. 按编号升序取第一个
-3. 宿主刷新 origin/main
+2. 按编号升序取第一个（本 run 已处理过的 issue 已进跳过集合，不再重复 pick）
+3. 收敛检查（T10）：进沙箱前查分支已有 PR
+   （gh pr list --head agent/issue-N --state all）：
+   · merged PR → issue 留言「已由 PR #N 处理，本轮跳过」，不启动沙箱
+   · open + clean + autoMerge 开 → 直接合并现有 PR（残留合并闭环），不启动沙箱
+   · open + clean + autoMerge 关 → issue 留言「已有 PR #N 待人工合并」，不合并不重做
+   · open + dirty → PR 留言说明冲突，本轮跳过
+   · 无 PR → 继续进沙箱
+4. 宿主刷新 origin/main
    （git fetch origin main；失败时降级本地 HEAD，不阻断）
-4. 创建独立分支 agent/issue-N
+5. 创建独立分支 agent/issue-N
    （git worktree，从最新 origin/main 创建，不影响你的工作区）
-5. 组装 prompt（模板 + issue 内容）
-                                         6. 启动容器（镜像 pi-afk:latest）
-                                         7. 按 lockfile 类型处理依赖
+6. 组装 prompt（模板 + issue 内容）
+                                         7. 启动容器（镜像 pi-afk:latest）
+                                         8. 按 lockfile 类型处理依赖
                                             · pnpm：共享宿主 store 秒级重建
                                             · npm/yarn：复制 node_modules + 增量安装
-                                         8. 运行 pi agent：
+                                         9. 运行 pi agent：
                                             探索 → 计划 → TDD 实现
                                             → 验证（typecheck + test）
                                             → 提交（只提交，不 push）
-                                         9. 输出 <promise>COMPLETE</promise>
+                                         10. 输出 <promise>COMPLETE</promise>
                                             和结构化 <outcome>{status, summary}
-10. 解析 outcome：
+11. 解析 outcome：
    · done + 有提交 → 预同步 + push 分支 + 创建 PR
      （PR body 含 "Closes #N"，合并后
        GitHub 自动关闭 issue）
@@ -75,8 +82,9 @@
      本轮跳过
    · autoMerge 开启时 → 自动 squash 合并 PR
      （合并失败等 30 秒重试一次，仍失败报错保留 gh 输出）
-10. 写事件日志（~/.afk/logs/afk.jsonl）
-11. 进入下一个 issue
+12. 写事件日志（~/.afk/logs/afk.jsonl）
+13. 进入下一个 issue（处理过的 issue 无论结果都进跳过集合，
+    同一 run 内不再重复 pick——防关闭状态传播延迟导致重复处理）
 ```
 
 ### 设计要点（协议）
@@ -88,6 +96,7 @@
 - **合并重试**：autoMerge 合并失败先等 30 秒重试一次（PR 刚创建时 GitHub 尚未算好可合并性），重试仍失败则报错并保留 gh 原始输出
 - **预同步合并（T11）**：agent 完成后、push 前，宿主把最新 `origin/main` 合并进分支（在分支临时 worktree 内执行 `git merge`，宿主操作、不涉沙箱凭据；sandcastle 干净 run 后会删除 worktree，故与验证门同一模式重建临时 worktree，不碰宿主主工作区）。合并干净 → 正常发布；合并冲突 → 中止合并还原分支、分支照常推送 + 创建 PR + **PR 留言冲突文件清单与下一步建议**（不留无声 dirty PR，hacxy.cn #23 事故教训）、不自动合并、该 issue 本轮跳过（不阻塞循环）
 - **验证门（可选）**：配置 `verifyCommand`（如 `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test:run`）后，发布流水线在预同步合并之后、push 之前于分支临时 worktree 执行该命令（干净检出，随用随删，不依赖沙箱 worktree 生命周期），校验的是将要推送的合并后状态，非零退出即停摆——留言说明验证失败、不发版、该 issue 本轮停止；默认不配置 = 信任 agent 声明（行为与现状一致）
+- **不重做（T10）**：两层防护防重复处理（hacxy.cn #18 事故复盘）——① 循环内去重：本 run 处理过的 issue 无论结果（done/blocked/skipped/验证失败/预同步冲突/收敛跳过）一律进跳过集合，同一 run 内不再重复 pick（防 merge 后关闭状态传播延迟导致列表仍显示 open 时被再次派发）；② pick 时收敛检查：进沙箱前 `gh pr list --head agent/issue-N --state all` 查分支已有 PR——merged → issue 留言「已由 PR #N 处理」跳过；open+clean → autoMerge 开时直接合并现有 PR 闭环（merge 失败残留 PR 下次 run 自动补合并）、关时 issue 留言「已有 PR #N 待人工合并」跳过（不重做、不自动合）；open+dirty → PR 留言说明冲突跳过（冲突化解由 T11/T13 承接）
 
 ---
 
@@ -286,7 +295,7 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 - **每次 issue 的沙箱日志**：`~/.afk/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）
 - **事件流**：`~/.afk/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
 
-日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result` / `presync-conflict` / `presync-fetch-failed` / `verify-failed` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
+日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result`（含收敛补合并 `merged-existing-pr`）/ `presync-conflict` / `presync-fetch-failed` / `verify-failed` / `convergence-skip`（含 `reason: merged|open-clean|dirty`）/ `convergence-check-failed` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
 
 ---
 

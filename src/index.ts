@@ -21,10 +21,18 @@ export {
   publishAndMerge,
   buildPresyncConflictComment,
   recentRalphCommits,
+  listPullRequestsForBranch,
+  decideConvergence,
+  buildAlreadyMergedComment,
+  buildPendingManualMergeComment,
+  buildDirtyPrComment,
+  mergeExistingPullRequest,
 } from './issues.js'
 export type {
   Issue,
   PullRequest,
+  ExistingPr,
+  ConvergenceAction,
   PublishAndMergeOptions,
   PublishAndMergeResult,
   PresyncResult,
