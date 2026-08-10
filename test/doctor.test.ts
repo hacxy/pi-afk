@@ -25,6 +25,7 @@ describe('doctorReport', () => {
           model: 'custom/model',
           labels: ['custom-label'],
           autoMerge: true,
+          verifyCommand: 'pnpm typecheck',
         },
       }),
     )
@@ -35,6 +36,17 @@ describe('doctorReport', () => {
     expect(report).toContain('labels:')
     expect(report).toContain('custom-label')
     expect(report).toContain('autoMerge: on')
+  })
+
+  it('verifyCommand 配置/未配置时分别显示对应状态', () => {
+    const set = doctorReport(
+      makeFacts({ config: { ...DEFAULT_GLOBAL_CONFIG, verifyCommand: 'make test' } }),
+    )
+    expect(set).toContain('verify:')
+    expect(set).toContain('make test')
+
+    const unset = doctorReport(makeFacts())
+    expect(unset).toContain('（无——跳过验证）')
   })
 
   it('输出包含模板绝对路径与来源层', () => {

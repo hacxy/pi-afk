@@ -8,6 +8,7 @@ import {
   recentRalphCommits,
   fetchOriginMain,
   isHitlIssue,
+  VerifyFailedError,
   type Issue,
 } from './issues.js'
 import { appendLog } from './log.js'
@@ -31,6 +32,7 @@ export type LoopEvent =
   | { type: 'issue-commented'; issue: Issue; reason: string }
   | { type: 'pull-request'; issue: Issue; url: string; prNumber: number }
   | { type: 'issue-merged'; issue: Issue; prNumber: number }
+  | { type: 'verify-failed'; issue: Issue; reason: string }
   | { type: 'no-more-tasks'; hitlPending: number }
   | { type: 'max-iterations-reached'; iteration: number }
   | { type: 'error'; message: string; issue?: Issue }
@@ -64,9 +66,10 @@ export function countHitlPending(issues: Issue[]): number {
 
 // ---------------------------------------------------------------------------
 // 单 issue 处理（纯异步函数，为并行预留——不依赖循环内共享可变状态）
+// 导出供测试走真实发布路径（验证门接线）
 // ---------------------------------------------------------------------------
 
-async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[]> {
+export async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[]> {
   const events: LoopEvent[] = []
   const branch = `agent/issue-${issue.number}`
 
@@ -122,13 +125,16 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
           })
           break
         }
-        // 保守派：宿主统一推送 + 开 PR（凭据不进沙箱）；autoMerge 时由流水线自动 squash 合并
+        // 保守派：宿主统一推送 + 开 PR（凭据不进沙箱）；autoMerge 时由流水线自动 squash 合并。
+        // 验证门（issue #22）：配置了 verifyCommand 时，push 前在分支临时 worktree 执行验证，
+        // 非零退出抛 VerifyFailedError，由下方 catch 留言说明并停止本轮（不发版）
         const { pr, merged } = await publishAndMerge({
           branch,
           title: `fix: issue #${issue.number} ${issue.title}`.slice(0, 100),
           body: `由 Ralph / pi-afk 自动生成\n\n${outcome.summary}\n\nCloses #${issue.number}`,
           projectDir: opts.projectDir,
           autoMerge: opts.config.autoMerge,
+          verifyCommand: opts.config.verifyCommand,
         })
         events.push({ type: 'pull-request', issue, url: pr.url, prNumber: pr.number })
 
@@ -163,6 +169,16 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
 
     return events
   } catch (err) {
+    if (err instanceof VerifyFailedError) {
+      // 验证门失败：不 push、留言说明验证失败、该 issue 本轮停止（不发版）
+      const reason = err.message
+      await commentOnIssue(
+        issue.number,
+        `Ralph 验证未通过，未发布（未创建 PR）。验证命令输出：\n\n${reason}`,
+      )
+      appendLog(LOG_DIR, { type: 'verify-failed', issueNumber: issue.number, message: reason })
+      return [...events, { type: 'verify-failed', issue, reason }]
+    }
     const message = err instanceof Error ? err.message : String(err)
     appendLog(LOG_DIR, { type: 'error', issueNumber: issue.number, message })
     return [{ type: 'error', message, issue }]
@@ -209,11 +225,12 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
     const issueEvents = await processIssue(issue, opts)
     events.push(...issueEvents)
 
-    // blocked/skipped 的 issue 本轮不再尝试
+    // blocked/skipped 的 issue 本轮不再尝试；验证失败（verify-failed）同样本轮停止
     const terminal = issueEvents.find(
       (e): e is Extract<LoopEvent, { type: 'issue-outcome' }> => e.type === 'issue-outcome',
     )
-    if (terminal && terminal.status !== 'done') {
+    const verifyFailed = issueEvents.some((e) => e.type === 'verify-failed')
+    if (verifyFailed || (terminal && terminal.status !== 'done')) {
       skipped.add(issue.number)
     }
   }

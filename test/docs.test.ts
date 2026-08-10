@@ -29,9 +29,9 @@ describe('CLI usage 文档-实现一致', () => {
     expect(USAGE_SOURCE).not.toMatch(/GH_TOKEN/)
   })
 
-  it('描述全局唯一 4 字段配置协议', () => {
+  it('描述全局唯一 5 字段配置协议', () => {
     expect(USAGE_SOURCE).toMatch(/\.afk\/config\.json/)
-    expect(USAGE_SOURCE).toMatch(/image \/ model \/ labels \/ autoMerge/)
+    expect(USAGE_SOURCE).toMatch(/image \/ model \/ labels \/ autoMerge \/ verifyCommand/)
   })
 
   it('描述 sandcastle 官方模板协议（.sandcastle/prompt.md）', () => {
