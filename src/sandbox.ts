@@ -1,7 +1,8 @@
 import { run, pi, Output } from '@ai-hero/sandcastle'
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker'
 import { execFileSync } from 'node:child_process'
-import { dirname } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 
 /**
@@ -63,14 +64,42 @@ function hostPnpmStoreDir(): string | undefined {
   }
 }
 
+/** 按 lockfile 类型识别包管理器（决定依赖安装策略） */
+function detectPackageManager(projectDir: string): 'pnpm' | 'npm' | 'yarn' | 'none' {
+  if (existsSync(join(projectDir, 'pnpm-lock.yaml'))) return 'pnpm'
+  if (existsSync(join(projectDir, 'yarn.lock'))) return 'yarn'
+  if (existsSync(join(projectDir, 'package-lock.json'))) return 'npm'
+  return 'none'
+}
+
 export async function runIssueInSandbox(opts: RunIssueOptions): Promise<RunIssueResult> {
   const env: Record<string, string> = { DEEPSEEK_API_KEY: opts.deepseekKey }
   const mounts: { hostPath: string; sandboxPath: string }[] = []
-  const storeDir = hostPnpmStoreDir()
-  if (storeDir) {
-    mounts.push({ hostPath: storeDir, sandboxPath: storeDir })
-    env.pnpm_config_store_dir = storeDir
-    env.pnpm_config_minimum_release_age = '0'
+  const copyToWorktree: string[] = []
+  let hooks: { sandbox: { onSandboxReady: { command: string }[] } } | undefined = undefined
+  const pm = detectPackageManager(opts.projectDir)
+
+  if (pm === 'pnpm') {
+    // pnpm 项目：共享宿主 store（writable，pnpm 需写 sqlite 索引），
+    // 不复制宿主 node_modules（macOS 平台产物是跨平台问题的根源），
+    // onSandboxReady 用共享 store 秒级重建 Linux 原生 node_modules
+    const storeDir = hostPnpmStoreDir()
+    if (storeDir) {
+      mounts.push({ hostPath: storeDir, sandboxPath: storeDir })
+      env.pnpm_config_store_dir = storeDir
+      env.pnpm_config_minimum_release_age = '0'
+    }
+    hooks = { sandbox: { onSandboxReady: [{ command: 'pnpm install' }] } }
+  } else if (pm === 'npm') {
+    // npm 项目：复制宿主 node_modules + 增量修复
+    copyToWorktree.push('node_modules')
+    hooks = { sandbox: { onSandboxReady: [{ command: 'npm install' }] } }
+  } else if (pm === 'yarn') {
+    copyToWorktree.push('node_modules')
+    hooks = { sandbox: { onSandboxReady: [{ command: 'yarn install' }] } }
+  } else {
+    // 无 lockfile：复制宿主 node_modules，agent 自行处理
+    copyToWorktree.push('node_modules')
   }
 
   const result = await run({
@@ -83,15 +112,8 @@ export async function runIssueInSandbox(opts: RunIssueOptions): Promise<RunIssue
     }),
     agent: pi(opts.model),
     branchStrategy: { type: 'branch', branch: opts.branch },
-    // 复用宿主 node_modules（避免全量重装），onSandboxReady 用共享 store 增量修复
-    copyToWorktree: ['node_modules'],
-    // 沙箱就绪后修复跨平台二进制（macOS 装的 node_modules 缺 Linux 平台包）
-    hooks: {
-      sandbox: {
-        onSandboxReady: [{ command: 'pnpm install' }],
-      },
-    },
-    promptFile: opts.promptFile,
+    copyToWorktree: copyToWorktree.length > 0 ? copyToWorktree : undefined,
+    hooks,
     promptArgs: opts.promptArgs,
     completionSignal: opts.completionSignal,
     output: Output.object({ tag: 'outcome', schema: outcomeSchema }),
