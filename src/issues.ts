@@ -56,19 +56,23 @@ export interface PublishAndMergeOptions {
   verifyCommand?: string
 }
 
-/** 预同步结果（T11） */
+/** 预同步结果（T11/T13） */
 export interface PresyncResult {
   /** 合并干净（分支已并入 origin/main；或预同步被跳过降级） */
   clean: boolean
   /** 冲突文件清单（clean 时为空数组） */
   conflictFiles: string[]
+  /** 被合并的 origin/main 提交 SHA（resolve prompt 注入；冲突路径为 MERGE_HEAD，干净路径缺省） */
+  mergeSha?: string
 }
 
 export interface PublishAndMergeResult {
-  pr: PullRequest
+  /** 创建的 PR。冲突路径（presyncConflict 存在）时未 push/建 PR，为 undefined */
+  pr?: PullRequest
   merged: boolean
-  /** 预同步冲突信息（冲突路径：PR 已建 + 已留言、未合并；干净路径为 undefined） */
-  presyncConflict?: { files: string[] }
+  /** 预同步冲突信息（冲突路径：冲突现场已保留在沙箱 worktree，由调用方派发 resolve run；
+   *   resolve 失败才走 publishConflictFallback 兜底） */
+  presyncConflict?: { files: string[]; mergeSha: string }
 }
 
 /** 验证门失败：发布流水线 push 前验证未通过（调用方据此留言说明并停止本轮，不发版） */
@@ -273,8 +277,10 @@ async function runVerifyGate(opts: {
  *
  * 预同步：push 前把最新 origin/main 合并进分支（在分支 worktree 内执行 merge，宿主操作、
  * 不涉沙箱凭据）。合并干净 → 继续验证门 + push + PR + autoMerge，行为与现状一致；
- * 合并冲突 → 中止合并、分支照常推送 + 建 PR + PR 留言冲突清单（不留无声 dirty PR，
- * hacxy.cn #23 事故教训），不 autoMerge（冲突 PR 无法合并）也不抛错（不阻塞循环）。
+ * 合并冲突 → **保留冲突现场**（不中止、不清理，冲突状态留在沙箱 worktree 供 T13 resolve run
+ * 复用 bind-mount 直接可见），返回 presyncConflict（含冲突文件清单与被合并的 main 提交 SHA），
+ * 不 push 不建 PR——由调用方派发第二次沙箱 run（resolve run）自动解冲突；resolve 失败才回退
+ * publishConflictFallback（push + PR + 留言，不留无声 dirty PR，hacxy.cn #23 事故教训）。
  *
  * 验证门（issue #22）：配置了 verifyCommand 时，预同步之后、push 之前在分支临时 worktree
  * 执行验证，非零退出即停摆（不发版）。验证的是将要推送的合并后状态。
@@ -286,20 +292,15 @@ export async function publishAndMerge(
 ): Promise<PublishAndMergeResult> {
   const presync = await presyncWithMain({ branch: opts.branch, projectDir: opts.projectDir })
   if (!presync.clean) {
-    // 冲突兜底：分支照常推送 + 建 PR + PR 留言冲突文件清单，不 autoMerge（待人工处理）
-    await pushBranch(opts.branch, opts.projectDir)
-    const pr = await createPullRequest({
-      branch: opts.branch,
-      title: opts.title,
-      body: opts.body,
-      projectDir: opts.projectDir,
-    })
-    await commentOnPullRequest(
-      pr.number,
-      buildPresyncConflictComment({ branch: opts.branch, files: presync.conflictFiles }),
-      opts.projectDir,
-    )
-    return { pr, merged: false, presyncConflict: { files: presync.conflictFiles } }
+    // 冲突：不在此兜底——冲突现场保留在沙箱 worktree（resolve run 复用），兜底延后到 resolve 失败
+    return {
+      pr: undefined,
+      merged: false,
+      presyncConflict: {
+        files: presync.conflictFiles,
+        mergeSha: presync.mergeSha ?? '（未知）',
+      },
+    }
   }
 
   if (opts.verifyCommand) {
@@ -328,16 +329,45 @@ export async function publishAndMerge(
 }
 
 /**
- * 预同步（T11）：push 前把最新 origin/main 合并进分支（宿主在分支 worktree 内执行 merge，
+ * 冲突兜底（T13 resolve 失败时调用）：分支照常推送 + 建 PR + PR 留言冲突文件清单，
+ * 不 autoMerge（冲突未解的 PR 无法合并）、不抛错（不阻塞循环）。
+ * 即 T11 原「冲突路径」兜底行为，独立成函数供 resolve 失败回退复用。
+ */
+export async function publishConflictFallback(opts: {
+  branch: string
+  title: string
+  body: string
+  projectDir: string
+  files: string[]
+}): Promise<{ pr: PullRequest }> {
+  await pushBranch(opts.branch, opts.projectDir)
+  const pr = await createPullRequest({
+    branch: opts.branch,
+    title: opts.title,
+    body: opts.body,
+    projectDir: opts.projectDir,
+  })
+  await commentOnPullRequest(
+    pr.number,
+    buildPresyncConflictComment({ branch: opts.branch, files: opts.files }),
+    opts.projectDir,
+  )
+  return { pr }
+}
+
+/**
+ * 预同步（T11/T13）：push 前把最新 origin/main 合并进分支（宿主在分支 worktree 内执行 merge，
  * 不涉沙箱凭据）。
  *
- * 为什么用临时 worktree：sandcastle 在干净 run 后会删除 worktree（仅脏状态保留），且分支
- * 可能仍被保留的 worktree 检出——与验证门（.verify-）同一模式：在 `.sandcastle/worktrees/`
- * 下建临时 worktree 执行 merge，不碰宿主主工作区。
+ * 为什么用沙箱 worktree 路径（`.sandcastle/worktrees/<branch 斜杠→连字符>`）：sandcastle 在干净
+ * run 后会删除 worktree（仅脏状态保留），且分支可能仍被保留的 worktree 检出——先幂等清理再建；
+ * 更重要的是 **T13 resolve run 复用同一 worktree**：冲突时保留合并现场（MERGE_HEAD + 未合并路径），
+ * sandcastle branch 策略创建 worktree 时发现该路径已有未提交改动，直接复用、bind-mount 可见冲突状态，
+ * 无需重建。
  *
  * 合并干净 → 分支头已含 main 最新，返回 { clean: true }（后续验证门校验合并后状态）。
- * 合并冲突 → `git merge --abort` 还原分支（头保持在 agent 提交），返回冲突文件清单，
- * 由发布流水线照常推送 + 建 PR + PR 留言兜底。
+ * 合并冲突 → **不 abort、不删 worktree**（冲突现场保留供 resolve run），返回冲突文件清单 +
+ * 被合并提交 SHA（MERGE_HEAD），由调用方派发 resolve run；resolve 失败才走发布流水线兜底。
  * 非冲突失败（如 origin/main 缺失）→ 中止并跳过预同步，行为同现状（不阻断发布）。
  */
 async function presyncWithMain(opts: {
@@ -355,34 +385,51 @@ async function presyncWithMain(opts: {
     appendLog(LOG_DIR, { type: 'presync-fetch-failed', branch, message })
   }
 
-  // 临时 worktree（与验证门同名命名：斜杠→连字符，前缀 .presync- 避免与 sandcastle 产物冲突）
-  const tmpDir = join(
-    projectDir,
-    '.sandcastle',
-    'worktrees',
-    `.presync-${branch.replace(/\//g, '-')}`,
-  )
-  // 幂等清理上次遗留的临时 worktree（不存在时忽略）
+  // 沙箱 worktree 路径（与 sandcastle branch 策略同名命名：斜杠→连字符），resolve run 据此复用
+  const tmpDir = sandboxWorktreeDir(projectDir, branch)
+  // 幂等清理上次遗留的 worktree（不存在时忽略）
   await git(['worktree', 'remove', '--force', tmpDir], projectDir).catch(() => undefined)
   // --force：分支可能仍被保留的沙箱 worktree 检出（done + 有未提交改动的场景）
   await git(['worktree', 'add', '--force', tmpDir, branch], projectDir)
 
   const result: PresyncResult = { clean: true, conflictFiles: [] }
+  let keepWorktree = false
   try {
     await git(['merge', '--no-edit', 'origin/main'], tmpDir)
   } catch {
     // 区分冲突与其他失败：冲突时工作区存在未合并路径（git diff --diff-filter=U）
     const unmerged = await unmergedFiles(tmpDir)
     if (unmerged.length > 0) {
+      // 冲突：保留合并现场（不 abort、不删 worktree），供 T13 resolve run 复用直接可见
       result.clean = false
       result.conflictFiles = unmerged
+      result.mergeSha = await mergedSha(tmpDir)
+      keepWorktree = true
+    } else {
+      // 非冲突失败（如 origin/main 缺失）：中止并跳过预同步，行为同现状
+      await git(['merge', '--abort'], tmpDir).catch(() => undefined)
     }
-    // 无论冲突与否都中止合并，还原分支头（冲突：PR 由流水线兜底；其他失败：跳过预同步）
-    await git(['merge', '--abort'], tmpDir).catch(() => undefined)
   } finally {
-    await git(['worktree', 'remove', '--force', tmpDir], projectDir).catch(() => undefined)
+    if (!keepWorktree) {
+      await git(['worktree', 'remove', '--force', tmpDir], projectDir).catch(() => undefined)
+    }
   }
   return result
+}
+
+/** 沙箱 worktree 目录（sandcastle branch 策略同名命名：分支斜杠→连字符） */
+export function sandboxWorktreeDir(projectDir: string, branch: string): string {
+  return join(projectDir, '.sandcastle', 'worktrees', branch.replace(/\//g, '-'))
+}
+
+/** 被合并提交 SHA（冲突现场为 MERGE_HEAD）；获取失败降级占位文本（不阻断冲突路径） */
+async function mergedSha(cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'MERGE_HEAD'], { cwd })
+    return stdout.trim() || '（未知）'
+  } catch {
+    return '（未知）'
+  }
 }
 
 /** 未合并路径清单（冲突文件）：git diff --name-only --diff-filter=U */

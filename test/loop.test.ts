@@ -140,43 +140,186 @@ describe('processIssue 验证门（issue #22）', () => {
   })
 })
 
-describe('runAfkLoop 预同步冲突本轮跳过（issue #23）', () => {
-  it('冲突路径：照常建 PR + PR 留言冲突清单，本轮跳过该 issue（不阻塞循环）', async () => {
+describe('runAfkLoop 预同步冲突 → resolve run（issue #25）', () => {
+  /** 冲突脚本：首次预同步 merge 冲突（保留现场），后续 merge 干净；含 rev-parse 供 MERGE_HEAD */
+  const conflictScript: (file: string, args: string[]) => ScriptResult = (file, args) => {
+    if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
+      return { stdout: JSON.stringify([issue22]) }
+    }
+    if (file === 'git' && args[0] === 'merge' && args[1] === '--no-edit') {
+      return {
+        error: Object.assign(new Error('merge conflict'), {
+          code: 1,
+          stderr: 'CONFLICT (content): Merge conflict in src/foo.ts',
+        }),
+      }
+    }
+    if (file === 'git' && args[0] === 'diff') {
+      return { stdout: 'src/foo.ts' }
+    }
+    if (file === 'git' && args[0] === 'rev-parse') {
+      return { stdout: 'deadbeef\n' }
+    }
+    return happyPath(file, args)
+  }
+
+  it('resolve 成功：冲突 → 派发 resolve run（复用分支/无 baseBranch + resolve 模板）→ push + PR + 自动合并', async () => {
+    let mergeCalls = 0
     scriptExec((file, args) => {
-      if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
-        return { stdout: JSON.stringify([issue22]) }
-      }
       if (file === 'git' && args[0] === 'merge' && args[1] === '--no-edit') {
-        return {
-          error: Object.assign(new Error('merge conflict'), {
-            code: 1,
-            stderr: 'CONFLICT (content): Merge conflict in src/foo.ts',
-          }),
-        }
+        mergeCalls += 1
+        // 首次预同步冲突；resolve 成功后的第二次发布预同步干净
+        return mergeCalls === 1
+          ? {
+              error: Object.assign(new Error('merge conflict'), {
+                code: 1,
+                stderr: 'CONFLICT (content): Merge conflict in src/foo.ts',
+              }),
+            }
+          : { stdout: 'Merged' }
       }
-      if (file === 'git' && args[0] === 'diff') {
-        return { stdout: 'src/foo.ts' }
-      }
-      if (file === 'git' && args[0] === 'merge' && args[1] === '--abort') {
-        return { stdout: '' }
-      }
-      return happyPath(file, args)
+      if (file === 'gh' && args[0] === 'pr' && args[1] === 'merge') return { stdout: 'merged' }
+      return conflictScript(file, args)
     })
+    // 沙箱两次：首次实现（done+提交）+ resolve run（done+提交）
+    vi.mocked(runIssueInSandbox)
+      .mockResolvedValueOnce({
+        outcome: { status: 'done', summary: 'all done' },
+        commits: [{ sha: 'a1b2c3' }],
+        stdout: '',
+      })
+      .mockResolvedValueOnce({
+        outcome: { status: 'done', summary: 'conflicts resolved' },
+        commits: [{ sha: 'r1r2r3' }],
+        stdout: '',
+      })
 
-    const events = await runAfkLoop(makeOpts())
+    const events = await runAfkLoop(makeOpts({ autoMerge: true }))
 
-    // PR 照常创建；PR 留言包含冲突文件清单
-    expect(events.some((e) => e.type === 'pull-request')).toBe(true)
-    const prComment = execFileMock.mock.calls
-      .filter(([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'comment')
-      .flatMap(([, args]) => args)
-    expect(prComment.join(' ')).toMatch(/src\/foo\.ts/)
-    // 产生 presync-conflict 事件，且本轮不再拾取该 issue（→ no-more-tasks）
+    // resolve run：第二次沙箱调用复用同一分支（无 baseBranch）、resolve 模板 + 冲突上下文注入
+    expect(vi.mocked(runIssueInSandbox)).toHaveBeenCalledTimes(2)
+    const secondCall = vi.mocked(runIssueInSandbox).mock.calls[1][0]
+    expect(secondCall.branch).toBe('agent/issue-22')
+    expect(secondCall.baseBranch).toBeUndefined()
+    expect(secondCall.promptFile).toMatch(/resolve\.md$/)
+    expect(secondCall.promptArgs).toMatchObject({
+      ISSUE_NUMBER: '22',
+      CONFLICT_FILES: expect.stringContaining('src/foo.ts'),
+      CONFLICT_COUNT: '1',
+      MERGED_SHA: 'deadbeef',
+      BRANCH: 'agent/issue-22',
+    })
+    // resolve 成功 → 第二次发布（push + PR + 合并），PR 干净并自动合并
     expect(events.find((e) => e.type === 'presync-conflict')).toMatchObject({
       issue: issue22,
       files: ['src/foo.ts'],
     })
+    expect(events.some((e) => e.type === 'pull-request')).toBe(true)
+    expect(events.some((e) => e.type === 'issue-merged')).toBe(true)
+    expect(events.some((e) => e.type === 'resolve-failed')).toBe(false)
+    // 本轮不再拾取该 issue（→ no-more-tasks）
     expect(events.filter((e) => e.type === 'issue-picked')).toHaveLength(1)
+    expect(events.some((e) => e.type === 'no-more-tasks')).toBe(true)
+  })
+
+  it('resolve 失败（blocked）：回退 T11 兜底（push + PR + 留言冲突清单），不自动合并', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
+        return { stdout: JSON.stringify([issue22]) }
+      }
+      return conflictScript(file, args)
+    })
+    vi.mocked(runIssueInSandbox)
+      .mockResolvedValueOnce({
+        outcome: { status: 'done', summary: 'all done' },
+        commits: [{ sha: 'a1b2c3' }],
+        stdout: '',
+      })
+      .mockResolvedValueOnce({
+        outcome: { status: 'blocked', summary: '无法获取关键上下文' },
+        commits: [],
+        stdout: '',
+      })
+
+    const events = await runAfkLoop(makeOpts({ autoMerge: true }))
+
+    expect(vi.mocked(runIssueInSandbox)).toHaveBeenCalledTimes(2)
+    // 回退兜底：push + 建 PR + PR 留言冲突清单，不自动合并（冲突未解）
+    expect(events.some((e) => e.type === 'pull-request')).toBe(true)
+    expect(events.find((e) => e.type === 'resolve-failed')).toMatchObject({
+      issue: issue22,
+      reason: expect.stringContaining('blocked'),
+    })
+    const prComment = execFileMock.mock.calls
+      .filter(([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'comment')
+      .flatMap(([, args]) => args)
+    expect(prComment.join(' ')).toMatch(/src\/foo\.ts/)
+    expect(
+      execFileMock.mock.calls.some(
+        ([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'merge',
+      ),
+    ).toBe(false)
+    expect(events.some((e) => e.type === 'issue-merged')).toBe(false)
+    expect(events.some((e) => e.type === 'no-more-tasks')).toBe(true)
+  })
+
+  it('resolve 报告 done 但零提交：按失败处理，回退 T11 兜底', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
+        return { stdout: JSON.stringify([issue22]) }
+      }
+      return conflictScript(file, args)
+    })
+    vi.mocked(runIssueInSandbox)
+      .mockResolvedValueOnce({
+        outcome: { status: 'done', summary: 'all done' },
+        commits: [{ sha: 'a1b2c3' }],
+        stdout: '',
+      })
+      .mockResolvedValueOnce({
+        outcome: { status: 'done', summary: '声称完成但没提交' },
+        commits: [],
+        stdout: '',
+      })
+
+    const events = await runAfkLoop(makeOpts({ autoMerge: true }))
+
+    expect(events.find((e) => e.type === 'resolve-failed')).toMatchObject({
+      issue: issue22,
+      reason: expect.stringContaining('零提交'),
+    })
+    expect(events.some((e) => e.type === 'pull-request')).toBe(true)
+    expect(
+      execFileMock.mock.calls.some(
+        ([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'merge',
+      ),
+    ).toBe(false)
+  })
+
+  it('resolve 沙箱错误（docker 不可用）：按失败回退兜底，不抛错不阻塞循环', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
+        return { stdout: JSON.stringify([issue22]) }
+      }
+      return conflictScript(file, args)
+    })
+    vi.mocked(runIssueInSandbox)
+      .mockResolvedValueOnce({
+        outcome: { status: 'done', summary: 'all done' },
+        commits: [{ sha: 'a1b2c3' }],
+        stdout: '',
+      })
+      .mockRejectedValueOnce(new Error('docker daemon unreachable'))
+
+    const events = await runAfkLoop(makeOpts())
+
+    expect(events.find((e) => e.type === 'resolve-failed')).toMatchObject({
+      issue: issue22,
+      reason: expect.stringContaining('docker daemon unreachable'),
+    })
+    // 兜底 PR 照常建立（冲突留言），本轮结束，不抛错
+    expect(events.some((e) => e.type === 'pull-request')).toBe(true)
+    expect(events.some((e) => e.type === 'error')).toBe(false)
     expect(events.some((e) => e.type === 'no-more-tasks')).toBe(true)
   })
 })

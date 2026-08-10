@@ -1,12 +1,19 @@
 import { execFile } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { publishAndMerge, VerifyFailedError, buildPresyncConflictComment } from '../src/issues.js'
+import {
+  publishAndMerge,
+  publishConflictFallback,
+  VerifyFailedError,
+  buildPresyncConflictComment,
+} from '../src/issues.js'
 import { appendLog } from '../src/log.js'
 
 /**
- * 发布流水线（T8，issue #21）+ 验证门（T12，issue #22）+ 预同步（T11，issue #23）：
- * 预同步 origin/main（冲突兜底留言）→ push → create PR →（可选）squash 合并 + 30s 重试。
+ * 发布流水线（T8，issue #21）+ 验证门（T12，issue #22）+ 预同步（T11，issue #23）
+ * + resolve run 冲突化解（T13，issue #25）：
+ * 预同步 origin/main（冲突时保留冲突现场、延后兜底）→（T13 派发 resolve run）
+ * → push → create PR →（可选）squash 合并 + 30s 重试。
  * 测试透过公开 API 走真实代码路径，仅在进程边界（execFile）处打桩脚本化 gh/git 输出。
  */
 
@@ -69,8 +76,8 @@ const baseOpts = {
   projectDir: '/tmp/project',
 }
 
-/** 预同步临时 worktree 路径（与实现同名命名：斜杠→连字符，前缀 .presync-） */
-const presyncWorktree = '/tmp/project/.sandcastle/worktrees/.presync-agent-issue-21'
+/** 预同步 worktree 路径（T13：复用沙箱 worktree 路径——resolve run 的 bind-mount 直接可见冲突状态） */
+const presyncWorktree = '/tmp/project/.sandcastle/worktrees/agent-issue-21'
 
 describe('publishAndMerge', () => {
   beforeEach(() => {
@@ -280,8 +287,12 @@ describe('publishAndMerge 预同步（issue #23）', () => {
     vi.useRealTimers()
   })
 
-  /** 冲突路径：merge 失败 → 取未合并路径清单 → 中止合并 → 照常推送 + 建 PR + PR 留言冲突清单 */
-  it('合并冲突：中止合并 → 照常推送 + 建 PR + PR 留言冲突清单，不 autoMerge、不抛错', async () => {
+  /**
+   * 冲突路径（T13 前置）：merge 失败 → 取未合并路径清单 + 被合并提交 SHA →
+   * 保留冲突现场（不 abort、不删 worktree，供 resolve run 复用直接可见）→
+   * 返回 presyncConflict，不 push 不建 PR（兜底延后到 resolve 失败）。
+   */
+  it('合并冲突：保留冲突现场 + 返回 presyncConflict（含文件清单与 mergeSha），不 push 不建 PR', async () => {
     scriptExec((file, args) => {
       if (file === 'git' && args[0] === 'merge' && args[1] === '--no-edit') {
         return {
@@ -294,42 +305,54 @@ describe('publishAndMerge 预同步（issue #23）', () => {
       if (file === 'git' && args[0] === 'diff') {
         return { stdout: 'src/foo.ts\ntest/foo.test.ts' }
       }
-      if (file === 'git' && args[0] === 'merge' && args[1] === '--abort') {
-        return { stdout: '' }
+      if (file === 'git' && args[0] === 'rev-parse') {
+        return { stdout: 'a1b2c3d4e5f6\n' }
       }
       return happyPath(file, args)
     })
 
-    // autoMerge 开启时冲突也不应触发合并（冲突 PR 无法合并，留言待人工处理）
+    // autoMerge 开启时冲突也不触发合并：冲突未解，合并/推送全部延后
     const result = await publishAndMerge({ ...baseOpts, autoMerge: true })
 
     expect(result.merged).toBe(false)
-    expect(result.presyncConflict).toEqual({ files: ['src/foo.ts', 'test/foo.test.ts'] })
-    expect(
-      execFileMock.mock.calls.some(
-        ([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'merge',
-      ),
-    ).toBe(false)
-
-    // 顺序：merge 失败 → diff 取冲突清单 → abort 还原分支 → 清理 worktree → push → PR → PR 留言
+    expect(result.pr).toBeUndefined()
+    expect(result.presyncConflict).toEqual({
+      files: ['src/foo.ts', 'test/foo.test.ts'],
+      mergeSha: 'a1b2c3d4e5f6',
+    })
+    // 冲突路径不 push、不建 PR、不留言（兜底由 resolve 失败时的 publishConflictFallback 承担）
     const calls = execFileMock.mock.calls.map(([file, args]) => [file, args.join(' ')])
-    expect(calls.slice(0, 8)).toEqual([
+    expect(calls.some(([f, a]) => f === 'git' && a.startsWith('push'))).toBe(false)
+    expect(calls.some(([f]) => f === 'gh')).toBe(false)
+    // 顺序：fetch → 建 worktree → merge 冲突 → diff 取清单 → rev-parse MERGE_HEAD；
+    // 不 abort、不删 worktree（冲突现场保留在沙箱 worktree，供 resolve run 复用）
+    expect(calls).toEqual([
       ['git', 'fetch origin main'],
       ['git', `worktree remove --force ${presyncWorktree}`],
       ['git', `worktree add --force ${presyncWorktree} agent/issue-21`],
       ['git', 'merge --no-edit origin/main'],
       ['git', 'diff --name-only --diff-filter=U'],
-      ['git', 'merge --abort'],
-      ['git', `worktree remove --force ${presyncWorktree}`],
-      ['git', 'push -u origin agent/issue-21'],
+      ['git', 'rev-parse MERGE_HEAD'],
     ])
-    expect(calls[8][0]).toBe('gh')
-    expect(calls[8][1]).toMatch(/^pr create/)
-    expect(calls[9][0]).toBe('gh')
-    expect(calls[9][1]).toMatch(/^pr comment 42 --body /)
-    // PR 留言包含冲突文件清单（不含未冲突文件）
-    expect(calls[9][1]).toContain('src/foo.ts')
-    expect(calls[9][1]).toContain('test/foo.test.ts')
+  })
+
+  /** mergeSha 获取失败（无 MERGE_HEAD 等）：降级为占位文本，不阻断冲突路径 */
+  it('合并冲突且 rev-parse 失败：mergeSha 降级占位文本，仍返回 presyncConflict', async () => {
+    scriptExec((file, args) => {
+      if (file === 'git' && args[0] === 'merge' && args[1] === '--no-edit') {
+        return {
+          error: Object.assign(new Error('merge conflict'), { code: 1, stderr: 'CONFLICT' }),
+        }
+      }
+      if (file === 'git' && args[0] === 'diff') return { stdout: 'src/foo.ts' }
+      if (file === 'git' && args[0] === 'rev-parse') {
+        return { error: new Error('fatal: ambiguous argument MERGE_HEAD') }
+      }
+      return happyPath(file, args)
+    })
+
+    const result = await publishAndMerge(baseOpts)
+    expect(result.presyncConflict).toEqual({ files: ['src/foo.ts'], mergeSha: '（未知）' })
   })
 
   /** 非冲突失败（如 origin/main 缺失）：跳过预同步，照常 push + PR（行为同现状），不留言 */
@@ -391,5 +414,40 @@ describe('publishAndMerge 预同步（issue #23）', () => {
     expect(body).toContain('`test/foo.test.ts`')
     expect(body).toContain('冲突文件（2）')
     expect(body).toContain('建议下一步')
+  })
+})
+
+describe('publishConflictFallback（T11 兜底：T13 resolve 失败时调用）', () => {
+  beforeEach(() => {
+    execFileMock.mockReset()
+    scriptExec(happyPath)
+  })
+
+  it('push + 建 PR + PR 留言冲突文件清单，不 autoMerge、不抛错', async () => {
+    const { pr } = await publishConflictFallback({
+      branch: 'agent/issue-21',
+      title: 'fix: issue #21 test',
+      body: 'Closes #21',
+      projectDir: '/tmp/project',
+      files: ['src/foo.ts', 'test/foo.test.ts'],
+    })
+
+    expect(pr.number).toBe(42)
+    const calls = execFileMock.mock.calls.map(([file, args]) => [file, args.join(' ')])
+    // push → 建 PR → PR 留言冲突清单（不触发合并）
+    expect(calls[0]).toEqual(['git', 'push -u origin agent/issue-21'])
+    expect(calls[1]).toEqual([
+      'gh',
+      'pr create --base main --head agent/issue-21 --title fix: issue #21 test --body Closes #21',
+    ])
+    expect(calls[2][0]).toBe('gh')
+    expect(calls[2][1]).toMatch(/^pr comment 42 --body /)
+    expect(calls[2][1]).toContain('src/foo.ts')
+    expect(calls[2][1]).toContain('test/foo.test.ts')
+    expect(
+      execFileMock.mock.calls.some(
+        ([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'merge',
+      ),
+    ).toBe(false)
   })
 })

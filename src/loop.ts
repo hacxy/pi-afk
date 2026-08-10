@@ -6,6 +6,7 @@ import {
   commentOnIssue,
   commentOnPullRequest,
   publishAndMerge,
+  publishConflictFallback,
   listPullRequestsForBranch,
   decideConvergence,
   buildAlreadyMergedComment,
@@ -20,8 +21,13 @@ import {
   type ExistingPr,
 } from './issues.js'
 import { appendLog } from './log.js'
-import { resolvePromptFile, buildIssuePromptArgs } from './prompts.js'
-import { runIssueInSandbox, type Outcome } from './sandbox.js'
+import {
+  resolvePromptFile,
+  buildIssuePromptArgs,
+  resolveResolvePromptFile,
+  buildResolvePromptArgs,
+} from './prompts.js'
+import { runIssueInSandbox, type Outcome, type RunIssueResult } from './sandbox.js'
 
 // ---------------------------------------------------------------------------
 // 事件模型：结构化事件数组，为并行与 Web UI 预留
@@ -44,6 +50,7 @@ export type LoopEvent =
   | { type: 'pr-pending-manual-merge'; issue: Issue; prNumber: number }
   | { type: 'pr-conflict-skip'; issue: Issue; prNumber: number }
   | { type: 'presync-conflict'; issue: Issue; files: string[] }
+  | { type: 'resolve-failed'; issue: Issue; reason: string }
   | { type: 'verify-failed'; issue: Issue; reason: string }
   | { type: 'no-more-tasks'; hitlPending: number }
   | { type: 'max-iterations-reached'; iteration: number }
@@ -210,33 +217,52 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           })
           break
         }
-        // 预同步（issue #23）：push 前宿主把最新 origin/main 合并进分支（干净 → 正常发布；
-        // 冲突 → 分支照常推送 + PR 留言冲突清单，不 autoMerge、不抛错）。
+        const title = `fix: issue #${issue.number} ${issue.title}`.slice(0, 100)
+        const body = `由 Ralph / pi-afk 自动生成\n\n${outcome.summary}\n\nCloses #${issue.number}`
+        // 预同步（issue #23）：push 前宿主把最新 origin/main 合并进分支；冲突 → 保留冲突现场并
+        // 返回 presyncConflict（不 push 不建 PR），由下方派发 T13 resolve run 自动解冲突。
         // 验证门（issue #22）：配置了 verifyCommand 时，预同步后、push 前在分支临时 worktree
-        // 执行验证，非零退出抛 VerifyFailedError，由下方 catch 留言说明并停止本轮（不发版）
-        const { pr, merged, presyncConflict } = await publishAndMerge({
+        // 执行验证，非零退出抛 VerifyFailedError，由外层 catch 留言说明并停止本轮（不发版）
+        const published = await publishAndMerge({
           branch,
-          title: `fix: issue #${issue.number} ${issue.title}`.slice(0, 100),
-          body: `由 Ralph / pi-afk 自动生成\n\n${outcome.summary}\n\nCloses #${issue.number}`,
+          title,
+          body,
           projectDir: opts.projectDir,
           autoMerge: opts.config.autoMerge,
           verifyCommand: opts.config.verifyCommand,
         })
-        events.push({ type: 'pull-request', issue, url: pr.url, prNumber: pr.number })
 
-        // 预同步冲突：PR 已建 + 已留言冲突清单，待人工处理（该 issue 本轮跳过）
-        if (presyncConflict) {
-          events.push({ type: 'presync-conflict', issue, files: presyncConflict.files })
+        if (published.presyncConflict) {
+          // 预同步冲突（T11/T13）：不再直接停摆——派发第二次沙箱 run（resolve run）自动解冲突；
+          // 成功 → 发布流水线（分支已含 origin/main，PR 干净自动合并）；失败 → 回退 T11 兜底
+          // （push + PR + 留言冲突清单）。该 issue 本轮无论如何都结束（防重复处理）。
+          events.push({ type: 'presync-conflict', issue, files: published.presyncConflict.files })
           appendLog(LOG_DIR, {
             type: 'presync-conflict',
             issueNumber: issue.number,
-            files: presyncConflict.files,
+            files: published.presyncConflict.files,
           })
-        }
-
-        // AFK 切片语义：合并后 GitHub 自动关 issue（合并失败已由流水线重试，重试仍失败抛错）
-        if (merged) {
-          events.push({ type: 'issue-merged', issue, prNumber: pr.number })
+          const resolveEvents = await resolveConflictAndPublish({
+            issue,
+            branch,
+            summary: outcome.summary,
+            conflict: published.presyncConflict,
+            loop: opts,
+          })
+          events.push(...resolveEvents)
+        } else {
+          if (published.pr) {
+            events.push({
+              type: 'pull-request',
+              issue,
+              url: published.pr.url,
+              prNumber: published.pr.number,
+            })
+          }
+          // AFK 切片语义：合并后 GitHub 自动关 issue（合并失败已由流水线重试，重试仍失败抛错）
+          if (published.merged && published.pr) {
+            events.push({ type: 'issue-merged', issue, prNumber: published.pr.number })
+          }
         }
         break
       }
@@ -279,6 +305,117 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
     appendLog(LOG_DIR, { type: 'error', issueNumber: issue.number, message })
     return [{ type: 'error', message, issue }]
   }
+}
+
+// ---------------------------------------------------------------------------
+// T13 resolve run：预同步冲突自动化解（issue #25）
+// ---------------------------------------------------------------------------
+
+/**
+ * T13 resolve run：预同步冲突后派发第二次沙箱 run 自动解冲突。
+ *
+ * - **复用同一 worktree**：不传 baseBranch（分支已存在），sandcastle branch 策略发现沙箱 worktree
+ *   （.sandcastle/worktrees/<分支斜杠→连字符>）已有未提交的冲突现场，直接复用、bind-mount 可见
+ *   冲突状态（不重建、不重跑实现）。
+ * - **prompt 注入**：冲突文件清单、被合并的 origin/main 提交 SHA、原始 issue 上下文；边界约束
+ *   写死在 resolve 模板（一次机会 / 同一验收门槛 / 只解决冲突与必要连带修改 / 禁止新功能无关重构 /
+ *   必须产生提交）。
+ * - 成功（done + 有提交）→ 分支已含 origin/main（解决提交完成合并），走发布流水线（预同步将干净）
+ *   → PR 干净并自动合并。
+ * - 失败（blocked/skipped/零提交/沙箱错误）→ 回退 T11 兜底路径（push + PR + 留言冲突清单）。
+ */
+async function resolveConflictAndPublish(opts: {
+  issue: Issue
+  branch: string
+  summary: string
+  conflict: { files: string[]; mergeSha: string }
+  loop: LoopOptions
+}): Promise<LoopEvent[]> {
+  const events: LoopEvent[] = []
+  const { issue, branch, summary, conflict, loop } = opts
+  const title = `fix: issue #${issue.number} ${issue.title}`.slice(0, 100)
+  const body = `由 Ralph / pi-afk 自动生成\n\n${summary}\n\nCloses #${issue.number}`
+  /** T11 兜底：分支照常推送 + 建 PR + PR 留言冲突文件清单（不留无声 dirty PR，hacxy.cn #23 教训） */
+  const fallback = async (reason: string): Promise<void> => {
+    const { pr } = await publishConflictFallback({
+      branch,
+      title,
+      body,
+      projectDir: loop.projectDir,
+      files: conflict.files,
+    })
+    events.push({ type: 'pull-request', issue, url: pr.url, prNumber: pr.number })
+    events.push({ type: 'resolve-failed', issue, reason })
+    appendLog(LOG_DIR, { type: 'resolve-failed', issueNumber: issue.number, reason })
+  }
+
+  let resolveResult: RunIssueResult
+  try {
+    resolveResult = await runIssueInSandbox({
+      image: loop.config.image,
+      model: loop.config.model,
+      deepseekKey: loop.deepseekKey,
+      projectDir: loop.projectDir,
+      branch,
+      promptFile: resolveResolvePromptFile(loop.projectDir),
+      promptArgs: buildResolvePromptArgs({
+        issue,
+        branch,
+        conflictFiles: conflict.files,
+        mergeSha: conflict.mergeSha,
+      }),
+      logPath: join(LOG_DIR, `issue-${issue.number}-resolve.log`),
+    })
+  } catch (err) {
+    // 沙箱/基础设施错误：按失败回退（分支照常推送 + PR + 留言），不抛错不阻塞循环
+    const message = err instanceof Error ? err.message : String(err)
+    await fallback(`resolve run 失败（${message}）`)
+    return events
+  }
+
+  const ok = resolveResult.outcome.status === 'done' && resolveResult.commits.length > 0
+  appendLog(LOG_DIR, {
+    type: ok ? 'resolve-success' : 'resolve-failed',
+    issueNumber: issue.number,
+    status: resolveResult.outcome.status,
+    commits: resolveResult.commits.length,
+    summary: resolveResult.outcome.summary,
+  })
+  if (!ok) {
+    const reason =
+      resolveResult.outcome.status === 'done' && resolveResult.commits.length === 0
+        ? 'resolve 报告 done 但零提交，按失败处理'
+        : `${resolveResult.outcome.status}: ${resolveResult.outcome.summary}`
+    await fallback(reason)
+    return events
+  }
+
+  // resolve 成功：分支已含 origin/main，走发布流水线（预同步将干净）→ PR 干净并自动合并
+  const published = await publishAndMerge({
+    branch,
+    title,
+    body,
+    projectDir: loop.projectDir,
+    autoMerge: loop.config.autoMerge,
+    verifyCommand: loop.config.verifyCommand,
+  })
+  if (published.presyncConflict) {
+    // 一次机会已用尽（main 又前进导致二次冲突）：不再派发第二次 resolve run，直接回退兜底
+    await fallback('resolve 后发布再次遇到预同步冲突（一次机会已用尽）')
+    return events
+  }
+  if (published.pr) {
+    events.push({
+      type: 'pull-request',
+      issue,
+      url: published.pr.url,
+      prNumber: published.pr.number,
+    })
+  }
+  if (published.merged && published.pr) {
+    events.push({ type: 'issue-merged', issue, prNumber: published.pr.number })
+  }
+  return events
 }
 
 // ---------------------------------------------------------------------------

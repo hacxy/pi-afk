@@ -68,9 +68,13 @@
        origin/main 合并进分支（分支 worktree
        内执行 git merge，宿主操作）：
         合并干净 → 继续发布
-        合并冲突 → 中止合并、分支照常推送 +
-        建 PR + PR 留言冲突文件清单与下一步
-        建议（不自动合并），该 issue 本轮跳过
+        合并冲突 → 保留冲突现场，派发第二次
+        沙箱 run（T13 resolve run）自动解冲突：
+        · resolve 成功 → 分支已含 main，
+          走发布流水线 → PR 干净并自动合并
+        · resolve 失败（blocked/skipped/零提交）
+          → 回退兜底：push + 建 PR + PR 留言
+          冲突文件清单与下一步建议（不自动合并）
      · 配置了 verifyCommand 时 → 预同步后、
        push 前在分支临时 worktree 执行验证
        （校验合并后状态）：
@@ -94,9 +98,9 @@
 - **进度锚点**：prompt 中注入最近 10 条 `Ralph:` 提交，让 agent 知道之前的进度
 - **依赖顺序**：issue 按编号升序处理 —— 配合按依赖顺序创建 issue 的规范，先被依赖的先实现
 - **合并重试**：autoMerge 合并失败先等 30 秒重试一次（PR 刚创建时 GitHub 尚未算好可合并性），重试仍失败则报错并保留 gh 原始输出
-- **预同步合并（T11）**：agent 完成后、push 前，宿主把最新 `origin/main` 合并进分支（在分支临时 worktree 内执行 `git merge`，宿主操作、不涉沙箱凭据；sandcastle 干净 run 后会删除 worktree，故与验证门同一模式重建临时 worktree，不碰宿主主工作区）。合并干净 → 正常发布；合并冲突 → 中止合并还原分支、分支照常推送 + 创建 PR + **PR 留言冲突文件清单与下一步建议**（不留无声 dirty PR，hacxy.cn #23 事故教训）、不自动合并、该 issue 本轮跳过（不阻塞循环）
+- **预同步合并（T11）+ resolve run（T13）**：agent 完成后、push 前，宿主把最新 `origin/main` 合并进分支（在分支沙箱 worktree 内执行 `git merge`，宿主操作、不涉沙箱凭据）。合并干净 → 正常发布；合并冲突 → **不再直接停摆**：保留冲突现场（MERGE_HEAD + 未合并路径），派发第二次沙箱 run（resolve run）自动解冲突——复用同一 worktree（sandcastle branch 策略 worktree 复用，bind-mount 直接可见冲突状态，不重建），prompt 注入冲突文件清单、被合并的 main 提交 SHA 与原始 issue 上下文，边界约束写死在模板（**一次机会**：解不了即失败回退；**同一验收门槛**：全量回归绿、沙箱内自证；只允许解决冲突与必要连带修改；禁止新功能/无关重构；必须产生提交，done 但零提交按失败）。resolve 成功 → 分支已含 main，走发布流水线 → PR 干净并自动合并；失败 → 回退 T11 兜底路径（push + 创建 PR + **PR 留言冲突文件清单与下一步建议**，不留无声 dirty PR，hacxy.cn #23 事故教训）、不自动合并、该 issue 本轮结束（不阻塞循环）
 - **验证门（可选）**：配置 `verifyCommand`（如 `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test:run`）后，发布流水线在预同步合并之后、push 之前于分支临时 worktree 执行该命令（干净检出，随用随删，不依赖沙箱 worktree 生命周期），校验的是将要推送的合并后状态，非零退出即停摆——留言说明验证失败、不发版、该 issue 本轮停止；默认不配置 = 信任 agent 声明（行为与现状一致）
-- **不重做（T10）**：两层防护防重复处理（hacxy.cn #18 事故复盘）——① 循环内去重：本 run 处理过的 issue 无论结果（done/blocked/skipped/验证失败/预同步冲突/收敛跳过）一律进跳过集合，同一 run 内不再重复 pick（防 merge 后关闭状态传播延迟导致列表仍显示 open 时被再次派发）；② pick 时收敛检查：进沙箱前 `gh pr list --head agent/issue-N --state all` 查分支已有 PR——merged → issue 留言「已由 PR #N 处理」跳过；open+clean → autoMerge 开时直接合并现有 PR 闭环（merge 失败残留 PR 下次 run 自动补合并）、关时 issue 留言「已有 PR #N 待人工合并」跳过（不重做、不自动合）；open+dirty → PR 留言说明冲突跳过（冲突化解由 T11/T13 承接）
+- **不重做（T10）**：两层防护防重复处理（hacxy.cn #18 事故复盘）——① 循环内去重：本 run 处理过的 issue 无论结果（done/blocked/skipped/验证失败/预同步冲突/收敛跳过）一律进跳过集合，同一 run 内不再重复 pick（防 merge 后关闭状态传播延迟导致列表仍显示 open 时被再次派发）；② pick 时收敛检查：进沙箱前 `gh pr list --head agent/issue-N --state all` 查分支已有 PR——merged → issue 留言「已由 PR #N 处理」跳过；open+clean → autoMerge 开时直接合并现有 PR 闭环（merge 失败残留 PR 下次 run 自动补合并）、关时 issue 留言「已有 PR #N 待人工合并」跳过（不重做、不自动合）；open+dirty → PR 留言说明冲突跳过（冲突化解由 T13 resolve run 承接，残留 dirty PR 的 issue 重新派发时自动化解）
 
 ---
 
@@ -144,7 +148,7 @@ afk 10        # 处理 10 个开放 issue（没有则立即结束）
 1. 生成全局配置 `~/.afk/config.json`（跨所有项目共享）
 2. 检查/构建沙箱镜像 `pi-afk:latest`（全局一次，所有项目复用）
 3. 向项目 `.gitignore` 追加 sandcastle 运行时产物忽略规则（幂等，仅 `.sandcastle/.env` / `logs/` / `worktrees/` 三条，`prompt.md` 可提交）
-4. 幂等复制默认模板到项目 `.sandcastle/prompt.md`（已存在则跳过）
+4. 幂等复制默认模板到项目 `.sandcastle/prompt.md` 与 `.sandcastle/resolve.md`（已存在则跳过）
 5. 检查 DEEPSEEK_API_KEY，缺失则明确报错
 
 **在项目里创建第一个任务**：
@@ -217,11 +221,16 @@ cd 你的项目 && afk doctor
 
 ## 提示词模板
 
-采用 **sandcastle 官方标准**：模板文件固定为项目 `.sandcastle/prompt.md`。自定义提示词模板只有一条规则：**把模板文件放到项目 `.sandcastle/prompt.md`（可提交 git，团队共享）**；没有则用包内内置默认模板。
+采用 **sandcastle 官方标准**：主模板固定为项目 `.sandcastle/prompt.md`；resolve 模板（预同步冲突自动化解）固定为项目 `.sandcastle/resolve.md`。自定义提示词模板只有一条规则：**把模板文件放到对应路径（可提交 git，团队共享）**；没有则用包内内置默认模板。
 
 ```
-优先级 1   项目 .sandcastle/prompt.md   ← 用户自定义（可提交 git，团队共享）
-优先级 2   包内 prompts/prompt.md       ← 默认（sandcastle 官方 simple-loop 命名）
+主模板：
+  优先级 1   项目 .sandcastle/prompt.md   ← 用户自定义（可提交 git，团队共享）
+  优先级 2   包内 prompts/prompt.md       ← 默认（sandcastle 官方 simple-loop 命名）
+
+resolve 模板（T13 冲突自动化解）：
+  优先级 1   项目 .sandcastle/resolve.md   ← 用户自定义（可提交 git，团队共享）
+  优先级 2   包内 prompts/resolve.md       ← 默认（边界约束写死：一次机会 / 同一验收门槛 / 只解决冲突 / 禁止新功能 / 必须提交）
 ```
 
 ### 占位符
@@ -295,7 +304,7 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 - **每次 issue 的沙箱日志**：`~/.afk/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）
 - **事件流**：`~/.afk/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
 
-日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result`（含收敛补合并 `merged-existing-pr`）/ `presync-conflict` / `presync-fetch-failed` / `verify-failed` / `convergence-skip`（含 `reason: merged|open-clean|dirty`）/ `convergence-check-failed` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
+日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result`（含收敛补合并 `merged-existing-pr`）/ `presync-conflict` / `presync-fetch-failed` / `resolve-success` / `resolve-failed` / `verify-failed` / `convergence-skip`（含 `reason: merged|open-clean|dirty`）/ `convergence-check-failed` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
 
 ---
 

@@ -20,9 +20,19 @@ export function promptFilePath(): string {
   return join(promptsDir(), 'prompt.md')
 }
 
+/** 包内默认 resolve 模板（T13 冲突自动化解：预同步冲突时派发的第二次沙箱 run） */
+export function resolvePromptFilePath(): string {
+  return join(promptsDir(), 'resolve.md')
+}
+
 /** 项目自定义模板路径（sandcastle 官方标准：.sandcastle/prompt.md） */
 export function projectPromptPath(projectDir: string): string {
   return join(projectDir, '.sandcastle', 'prompt.md')
+}
+
+/** 项目自定义 resolve 模板路径（T13：.sandcastle/resolve.md） */
+export function projectResolvePromptPath(projectDir: string): string {
+  return join(projectDir, '.sandcastle', 'resolve.md')
 }
 
 /**
@@ -35,6 +45,15 @@ export function resolvePromptFile(projectDir: string): string {
 }
 
 /**
+ * 解析生效的 resolve 模板路径（T13）：
+ * 项目 .sandcastle/resolve.md > 包内默认 prompts/resolve.md
+ */
+export function resolveResolvePromptFile(projectDir: string): string {
+  const projectResolve = projectResolvePromptPath(projectDir)
+  return existsSync(projectResolve) ? projectResolve : resolvePromptFilePath()
+}
+
+/**
  * afk init：幂等复制默认模板到项目 .sandcastle/prompt.md（已存在则跳过，不覆盖用户修改）。
  * 返回项目模板路径。
  */
@@ -43,6 +62,19 @@ export function ensureProjectPrompt(projectDir: string): string {
   if (!existsSync(target)) {
     mkdirSync(dirname(target), { recursive: true })
     copyFileSync(promptFilePath(), target)
+  }
+  return target
+}
+
+/**
+ * afk init：幂等复制默认 resolve 模板到项目 .sandcastle/resolve.md（已存在则跳过，不覆盖用户修改）。
+ * 返回项目 resolve 模板路径。
+ */
+export function ensureProjectResolvePrompt(projectDir: string): string {
+  const target = projectResolvePromptPath(projectDir)
+  if (!existsSync(target)) {
+    mkdirSync(dirname(target), { recursive: true })
+    copyFileSync(resolvePromptFilePath(), target)
   }
   return target
 }
@@ -93,6 +125,13 @@ export function ensureSandcastleGitignore(projectDir: string): void {
   )
 }
 
+/** issue 评论文本（供 prompt 注入） */
+function issueCommentsText(issue: Pick<Issue, 'comments'>): string {
+  return issue.comments.length > 0
+    ? issue.comments.map((c) => `- **${c.author.login}**: ${c.body}`).join('\n\n')
+    : '（无评论）'
+}
+
 /** 组装单 issue 的 promptArgs（供 sandcastle 替换 {{KEY}}） */
 export function buildIssuePromptArgs(opts: {
   issue: Issue
@@ -100,16 +139,39 @@ export function buildIssuePromptArgs(opts: {
   recentCommits: string
 }): Record<string, string> {
   const { issue, branch, recentCommits } = opts
-  const comments =
-    issue.comments.length > 0
-      ? issue.comments.map((c) => `- **${c.author.login}**: ${c.body}`).join('\n\n')
-      : '（无评论）'
   return {
     ISSUE_NUMBER: String(issue.number),
     ISSUE_TITLE: issue.title,
     ISSUE_BODY: issue.body || '（无正文）',
-    ISSUE_COMMENTS: comments,
+    ISSUE_COMMENTS: issueCommentsText(issue),
     RECENT_COMMITS: recentCommits,
+    BRANCH: branch,
+  }
+}
+
+/**
+ * 组装 resolve run 的 promptArgs（T13）：冲突文件清单 + 被合并的 main 提交 SHA +
+ * 原始 issue 上下文（编号/标题/正文/评论）+ 分支名。
+ */
+export function buildResolvePromptArgs(opts: {
+  issue: Issue
+  branch: string
+  conflictFiles: string[]
+  mergeSha: string
+}): Record<string, string> {
+  const { issue, branch, conflictFiles, mergeSha } = opts
+  const fileList =
+    conflictFiles.length > 0
+      ? conflictFiles.map((f) => `- \`${f}\``).join('\n')
+      : '- （无法获取冲突文件清单，请查看 git status）'
+  return {
+    ISSUE_NUMBER: String(issue.number),
+    ISSUE_TITLE: issue.title,
+    ISSUE_BODY: issue.body || '（无正文）',
+    ISSUE_COMMENTS: issueCommentsText(issue),
+    CONFLICT_FILES: fileList,
+    CONFLICT_COUNT: String(conflictFiles.length),
+    MERGED_SHA: mergeSha,
     BRANCH: branch,
   }
 }
