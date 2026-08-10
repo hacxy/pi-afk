@@ -1,7 +1,7 @@
 /* eslint-disable no-console */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
-import { join, resolve, dirname } from 'node:path'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
@@ -16,6 +16,7 @@ import {
 import { requireDeepseekKey } from './credentials.js'
 import { appendLog } from './log.js'
 import { runAfkLoop, type LoopEvent } from './loop.js'
+import { ensureProjectPrompt, ensureSandcastleGitignore } from './prompts.js'
 
 const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
 
@@ -88,26 +89,18 @@ function ensureImage(cfg: GlobalConfig): boolean {
   }
 }
 
-/** 项目 .gitignore 追加 .sandcastle/（幂等，每项目仅一次生效） */
-function ensureGitignore(projectDir: string): void {
-  const gitignore = join(projectDir, '.gitignore')
-  if (existsSync(gitignore)) {
-    const content = readFileSync(gitignore, 'utf8')
-    if (!content.includes('.sandcastle/')) {
-      appendFileSync(gitignore, '\n# pi-afk 运行时工作区\n.sandcastle/\n', 'utf8')
-      console.log('✓ 已向 .gitignore 追加 .sandcastle/')
-    }
-  } else {
-    writeFileSync(gitignore, '.sandcastle/\n', 'utf8')
-    console.log('✓ 已创建 .gitignore（含 .sandcastle/）')
-  }
+/** 项目模板：幂等复制默认模板到 .sandcastle/prompt.md（已存在则跳过） */
+function ensureProjectTemplate(projectDir: string): void {
+  const path = ensureProjectPrompt(projectDir)
+  console.log(`✓ 项目模板就绪: ${path}（可编辑后提交 git，团队共享）`)
 }
 
 /** 运行时前置检查（afk <N> 每次自动执行，无需手动 init） */
 function ensureRuntime(cfg: GlobalConfig, projectDir: string): boolean {
   ensureGlobalConfig()
   ensureGlobalDirs()
-  ensureGitignore(projectDir)
+  ensureSandcastleGitignore(projectDir)
+  ensureProjectTemplate(projectDir)
   if (!requireDeepseekKey()) {
     return false
   }
@@ -144,8 +137,12 @@ async function initCmd(projectDir: string): Promise<void> {
     return
   }
 
-  // 5. 项目 .gitignore 增加 .sandcastle/
-  ensureGitignore(projectDir)
+  // 5. 项目 .gitignore 忽略运行时产物（prompt.md 可提交）
+  ensureSandcastleGitignore(projectDir)
+  console.log('✓ .gitignore 已配置（.sandcastle 运行时产物忽略，prompt.md 可提交）')
+
+  // 6. 项目模板：幂等复制默认模板到 .sandcastle/prompt.md
+  ensureProjectTemplate(projectDir)
 
   console.log('\n初始化完成。现在可以运行: afk 10')
 }

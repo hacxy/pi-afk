@@ -25,8 +25,15 @@ export type { Issue, PullRequest } from './issues.js'
 export { runIssueInSandbox, outcomeSchema } from './sandbox.js'
 export type { Outcome, RunIssueOptions, RunIssueResult } from './sandbox.js'
 
-// 提示词
-export { promptFilePath, buildIssuePromptArgs } from './prompts.js'
+// 提示词（sandcastle 官方模板协议：项目 .sandcastle/prompt.md > 包内默认）
+export {
+  promptFilePath,
+  projectPromptPath,
+  resolvePromptFile,
+  ensureProjectPrompt,
+  ensureSandcastleGitignore,
+  buildIssuePromptArgs,
+} from './prompts.js'
 
 // 日志
 export { appendLog } from './log.js'

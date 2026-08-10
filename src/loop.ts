@@ -81,7 +81,7 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
       deepseekKey: opts.deepseekKey,
       projectDir: opts.projectDir,
       branch,
-      promptFile: resolvePromptFile(),
+      promptFile: resolvePromptFile(opts.projectDir),
       promptArgs,
       logPath: join(LOG_DIR, `issue-${issue.number}.log`),
     })
