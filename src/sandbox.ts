@@ -37,7 +37,7 @@ export interface RunIssueOptions {
   promptFile: string
   /** 注入 prompt 的参数 */
   promptArgs: Record<string, string>
-  /** 运行日志路径（全局 ~/.afk/logs/ 下） */
+  /** 运行日志路径（项目 .sandcastle/logs/ 下，issue #33） */
   logPath: string
   /** 无输出超时（秒） */
   idleTimeoutSeconds?: number

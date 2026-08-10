@@ -209,6 +209,9 @@ describe('runAfkLoop 预同步冲突 → resolve run（issue #25）', () => {
       MERGED_SHA: 'deadbeef',
       BRANCH: 'agent/issue-22',
     })
+    // issue #33：resolve run 沙箱日志写入项目 .sandcastle/logs/issue-<N>-resolve.log
+    expect(secondCall.logPath).toBe(join(dir, '.sandcastle', 'logs', 'issue-22-resolve.log'))
+    expect(secondCall.logPath).not.toContain('.afk')
     // resolve 成功 → 第二次发布（push + PR + 合并），PR 干净并自动合并
     expect(events.find((e) => e.type === 'presync-conflict')).toMatchObject({
       issue: issue22,
@@ -425,13 +428,17 @@ describe('processIssue 收敛检查（issue #24）', () => {
     ).toBe(true)
   })
 
-  it('无 PR：proceed，正常进沙箱（行为不变）', async () => {
+  it('无 PR：proceed，正常进沙箱（行为不变），沙箱日志写入项目 .sandcastle/logs/（issue #33）', async () => {
     scriptExec(withPrList([]))
 
     const events = await processIssue(issue22, makeOpts())
 
     expect(vi.mocked(runIssueInSandbox)).toHaveBeenCalledTimes(1)
     expect(events.some((e) => e.type === 'pull-request')).toBe(true)
+    // issue #33：日志路径从全局 ~/.afk/logs 迁移到项目 .sandcastle/logs/
+    const sandboxOpts = vi.mocked(runIssueInSandbox).mock.calls[0][0]
+    expect(sandboxOpts.logPath).toBe(join(dir, '.sandcastle', 'logs', 'issue-22.log'))
+    expect(sandboxOpts.logPath).not.toContain('.afk')
   })
 })
 

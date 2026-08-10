@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 
-import { loadGlobalConfig, type GlobalConfig } from './config.js'
+import { loadGlobalConfig, projectLogDir, type GlobalConfig } from './config.js'
 import { projectPromptPath, resolvePromptFile } from './prompts.js'
 
 /**
@@ -14,6 +14,8 @@ export interface DoctorFacts {
   templatePath: string
   /** 模板来源层：项目 .sandcastle/prompt.md 或包内默认 */
   templateSource: 'project' | 'bundled'
+  /** 当前生效的日志路径（项目 .sandcastle/logs/，issue #33） */
+  logPath: string
   /** 沙箱镜像是否存在 */
   imageExists: boolean
   /** gh 是否已登录 */
@@ -50,6 +52,7 @@ export function collectDoctorFacts(projectDir: string): DoctorFacts {
     config,
     templatePath,
     templateSource: templatePath === projectPromptPath(projectDir) ? 'project' : 'bundled',
+    logPath: projectLogDir(projectDir),
     imageExists: dockerImageExists(config.image),
     ghLoggedIn: ghLoggedIn(),
   }
@@ -57,7 +60,7 @@ export function collectDoctorFacts(projectDir: string): DoctorFacts {
 
 /** 渲染 doctor 报告（纯函数） */
 export function doctorReport(facts: DoctorFacts): string {
-  const { config, templatePath, templateSource, imageExists, ghLoggedIn } = facts
+  const { config, templatePath, templateSource, logPath, imageExists, ghLoggedIn } = facts
   const sourceLabel = templateSource === 'project' ? '（项目自定义）' : '（包内默认）'
   return [
     '=== afk doctor ===',
@@ -70,6 +73,8 @@ export function doctorReport(facts: DoctorFacts): string {
     `  verify:    ${config.verifyCommand ?? '（无——跳过验证）'}`,
     '',
     `模板: ${templatePath} ${sourceLabel}`,
+    '',
+    `日志路径: ${logPath}（项目 .sandcastle/logs/）`,
     '',
     '检查项:',
     `  ${imageExists ? '✓' : '✗'} 沙箱镜像: ${

@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 
-import { LOG_DIR, type GlobalConfig } from './config.js'
+import { projectLogDir, type GlobalConfig } from './config.js'
 import {
   listAfkIssues,
   commentOnIssue,
@@ -91,6 +91,8 @@ export function countHitlPending(issues: Issue[]): number {
 export async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[]> {
   const events: LoopEvent[] = []
   const branch = `agent/issue-${issue.number}`
+  // issue #33：事件流与沙箱日志写入项目 .sandcastle/logs/（不再写全局 ~/.afk/logs）
+  const logDir = projectLogDir(opts.projectDir)
 
   try {
     // 收敛检查（T10）：进沙箱前查分支是否已有 PR——防重做（hacxy.cn #18 事故：merge 后关闭状态
@@ -100,7 +102,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
       existingPrs = await listPullRequestsForBranch(branch, opts.projectDir)
     } catch (err) {
       // 查询失败（gh/网络故障）降级：记日志、按无 PR 继续（sandcastle 非致命哲学）
-      appendLog(LOG_DIR, {
+      appendLog(logDir, {
         type: 'convergence-check-failed',
         issueNumber: issue.number,
         message: err instanceof Error ? err.message : String(err),
@@ -112,7 +114,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
         // merged PR 已处理：issue 留言 + 跳过（不启动沙箱）
         await commentOnIssue(issue.number, buildAlreadyMergedComment(decision.prNumber))
         events.push({ type: 'pr-exists-merged', issue, prNumber: decision.prNumber })
-        appendLog(LOG_DIR, {
+        appendLog(logDir, {
           type: 'convergence-skip',
           issueNumber: issue.number,
           prNumber: decision.prNumber,
@@ -124,7 +126,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
         // open + clean + autoMerge 关：不重做、不自动合，issue 留言待人工合并（保留 review 语义）
         await commentOnIssue(issue.number, buildPendingManualMergeComment(decision.prNumber))
         events.push({ type: 'pr-pending-manual-merge', issue, prNumber: decision.prNumber })
-        appendLog(LOG_DIR, {
+        appendLog(logDir, {
           type: 'convergence-skip',
           issueNumber: issue.number,
           prNumber: decision.prNumber,
@@ -140,7 +142,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           opts.projectDir,
         )
         events.push({ type: 'pr-conflict-skip', issue, prNumber: decision.prNumber })
-        appendLog(LOG_DIR, {
+        appendLog(logDir, {
           type: 'convergence-skip',
           issueNumber: issue.number,
           prNumber: decision.prNumber,
@@ -153,7 +155,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
         // 下次 run 自动补合并）；PR body 的 Closes #N 随之关闭 issue
         await mergeExistingPullRequest({ prNumber: decision.prNumber, projectDir: opts.projectDir })
         events.push({ type: 'issue-merged', issue, prNumber: decision.prNumber })
-        appendLog(LOG_DIR, {
+        appendLog(logDir, {
           type: 'issue-result',
           issueNumber: issue.number,
           status: 'merged-existing-pr',
@@ -178,7 +180,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
       baseBranch = 'origin/main'
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      appendLog(LOG_DIR, {
+      appendLog(logDir, {
         type: 'fetch-origin-main-failed',
         issueNumber: issue.number,
         message,
@@ -194,7 +196,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
       baseBranch,
       promptFile: resolvePromptFile(opts.projectDir),
       promptArgs,
-      logPath: join(LOG_DIR, `issue-${issue.number}.log`),
+      logPath: join(logDir, `issue-${issue.number}.log`),
     })
 
     const { outcome } = result
@@ -237,7 +239,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           // 成功 → 发布流水线（分支已含 origin/main，PR 干净自动合并）；失败 → 回退 T11 兜底
           // （push + PR + 留言冲突清单）。该 issue 本轮无论如何都结束（防重复处理）。
           events.push({ type: 'presync-conflict', issue, files: published.presyncConflict.files })
-          appendLog(LOG_DIR, {
+          appendLog(logDir, {
             type: 'presync-conflict',
             issueNumber: issue.number,
             files: published.presyncConflict.files,
@@ -281,7 +283,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
       }
     }
 
-    appendLog(LOG_DIR, {
+    appendLog(logDir, {
       type: 'issue-result',
       issueNumber: issue.number,
       status: outcome.status,
@@ -298,11 +300,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
         issue.number,
         `Ralph 验证未通过，未发布（未创建 PR）。验证命令输出：\n\n${reason}`,
       )
-      appendLog(LOG_DIR, { type: 'verify-failed', issueNumber: issue.number, message: reason })
+      appendLog(logDir, { type: 'verify-failed', issueNumber: issue.number, message: reason })
       return [...events, { type: 'verify-failed', issue, reason }]
     }
     const message = err instanceof Error ? err.message : String(err)
-    appendLog(LOG_DIR, { type: 'error', issueNumber: issue.number, message })
+    appendLog(logDir, { type: 'error', issueNumber: issue.number, message })
     return [{ type: 'error', message, issue }]
   }
 }
@@ -333,6 +335,8 @@ async function resolveConflictAndPublish(opts: {
 }): Promise<LoopEvent[]> {
   const events: LoopEvent[] = []
   const { issue, branch, summary, conflict, loop } = opts
+  // issue #33：日志写入项目 .sandcastle/logs/
+  const logDir = projectLogDir(loop.projectDir)
   const title = `fix: issue #${issue.number} ${issue.title}`.slice(0, 100)
   const body = `由 Ralph / pi-afk 自动生成\n\n${summary}\n\nCloses #${issue.number}`
   /** T11 兜底：分支照常推送 + 建 PR + PR 留言冲突文件清单（不留无声 dirty PR，hacxy.cn #23 教训） */
@@ -346,7 +350,7 @@ async function resolveConflictAndPublish(opts: {
     })
     events.push({ type: 'pull-request', issue, url: pr.url, prNumber: pr.number })
     events.push({ type: 'resolve-failed', issue, reason })
-    appendLog(LOG_DIR, { type: 'resolve-failed', issueNumber: issue.number, reason })
+    appendLog(logDir, { type: 'resolve-failed', issueNumber: issue.number, reason })
   }
 
   let resolveResult: RunIssueResult
@@ -364,7 +368,7 @@ async function resolveConflictAndPublish(opts: {
         conflictFiles: conflict.files,
         mergeSha: conflict.mergeSha,
       }),
-      logPath: join(LOG_DIR, `issue-${issue.number}-resolve.log`),
+      logPath: join(logDir, `issue-${issue.number}-resolve.log`),
     })
   } catch (err) {
     // 沙箱/基础设施错误：按失败回退（分支照常推送 + PR + 留言），不抛错不阻塞循环
@@ -374,7 +378,7 @@ async function resolveConflictAndPublish(opts: {
   }
 
   const ok = resolveResult.outcome.status === 'done' && resolveResult.commits.length > 0
-  appendLog(LOG_DIR, {
+  appendLog(logDir, {
     type: ok ? 'resolve-success' : 'resolve-failed',
     issueNumber: issue.number,
     status: resolveResult.outcome.status,
@@ -426,9 +430,11 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
   const events: LoopEvent[] = []
   const skipped = new Set<number>()
 
+  const logDir = projectLogDir(opts.projectDir)
+
   for (let i = 1; i <= opts.iterations; i++) {
     events.push({ type: 'iteration-start', iteration: i, total: opts.iterations })
-    appendLog(LOG_DIR, { type: 'iteration-start', iteration: i })
+    appendLog(logDir, { type: 'iteration-start', iteration: i })
 
     let issues: Issue[]
     try {
@@ -444,12 +450,12 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
       // 没有可自动处理的 issue 时，告知待人工的 HITL 切片数
       const hitlPending = countHitlPending(issues)
       events.push({ type: 'no-more-tasks', hitlPending })
-      appendLog(LOG_DIR, { type: 'no-more-tasks', hitlPending })
+      appendLog(logDir, { type: 'no-more-tasks', hitlPending })
       break
     }
 
     events.push({ type: 'issue-picked', issue })
-    appendLog(LOG_DIR, {
+    appendLog(logDir, {
       type: 'issue-picked',
       issueNumber: issue.number,
       title: issue.title,

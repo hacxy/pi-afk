@@ -5,7 +5,7 @@ export { runAfkLoop, pickIssue } from './loop.js'
 export type { LoopEvent, LoopOptions } from './loop.js'
 
 // 配置
-export { loadGlobalConfig, globalConfigPath, ensureGlobalDirs } from './config.js'
+export { loadGlobalConfig, globalConfigPath, projectLogDir } from './config.js'
 export type { GlobalConfig } from './config.js'
 
 // 凭据

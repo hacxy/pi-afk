@@ -9,8 +9,7 @@ import {
   loadGlobalConfig,
   globalConfigPath,
   DEFAULT_GLOBAL_CONFIG,
-  ensureGlobalDirs,
-  LOG_DIR,
+  projectLogDir,
   type GlobalConfig,
 } from './config.js'
 import { requireDeepseekKey } from './credentials.js'
@@ -111,10 +110,10 @@ function ensureProjectTemplate(projectDir: string): void {
   console.log(`✓ resolve 模板就绪: ${resolvePath}（预同步冲突自动化解）`)
 }
 
-/** 全局环境就绪（幂等）：生成全局配置 + 确保日志目录；init 与运行时自动初始化共用的唯一入口 */
+/** 全局环境就绪（幂等）：生成全局配置；init 与运行时自动初始化共用的唯一入口。
+ * 日志目录不再全局预建（issue #33）：日志写入目标项目 .sandcastle/logs/，由 appendLog 惰性创建。 */
 function ensureGlobalEnv(): void {
   ensureGlobalConfig()
-  ensureGlobalDirs()
 }
 
 /** 运行时前置检查（afk <N> 每次自动执行，无需手动 init） */
@@ -131,7 +130,7 @@ function ensureRuntime(cfg: GlobalConfig, projectDir: string): boolean {
 async function initCmd(projectDir: string): Promise<void> {
   const cfg = loadGlobalConfig()
 
-  // 1. 全局环境（配置 + 日志目录）
+  // 1. 全局环境（配置；日志目录已迁至项目 .sandcastle/logs/，运行时惰性创建）
   ensureGlobalEnv()
 
   // 2. deepseek key
@@ -286,7 +285,7 @@ async function main(): Promise<void> {
 
   const deepseekKey = requireDeepseekKey()
 
-  appendLog(LOG_DIR, { type: 'run-start', projectDir, iterations })
+  appendLog(projectLogDir(projectDir), { type: 'run-start', projectDir, iterations })
 
   const events = await runAfkLoop({
     projectDir,
@@ -296,7 +295,7 @@ async function main(): Promise<void> {
   })
 
   printEvents(events)
-  appendLog(LOG_DIR, { type: 'run-end', events: events.length })
+  appendLog(projectLogDir(projectDir), { type: 'run-end', events: events.length })
 
   const errors = events.filter((e) => e.type === 'error')
   const done = events.filter((e) => e.type === 'issue-outcome' && e.status === 'done')

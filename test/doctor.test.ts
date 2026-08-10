@@ -11,6 +11,7 @@ const makeFacts = (overrides: Partial<DoctorFacts> = {}): DoctorFacts => ({
   config: { ...DEFAULT_GLOBAL_CONFIG },
   templatePath: promptFilePath(),
   templateSource: 'bundled',
+  logPath: join('/proj', '.sandcastle', 'logs'),
   imageExists: true,
   ghLoggedIn: true,
   ...overrides,
@@ -47,6 +48,12 @@ describe('doctorReport', () => {
 
     const unset = doctorReport(makeFacts())
     expect(unset).toContain('（无——跳过验证）')
+  })
+
+  it('输出包含当前生效的日志路径（项目 .sandcastle/logs/）', () => {
+    const report = doctorReport(makeFacts({ logPath: '/proj/.sandcastle/logs' }))
+    expect(report).toContain('日志路径')
+    expect(report).toContain('/proj/.sandcastle/logs')
   })
 
   it('输出包含模板绝对路径与来源层', () => {
