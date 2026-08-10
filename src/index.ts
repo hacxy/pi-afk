@@ -1,5 +1,10 @@
 // 公共 API 导出（库 + CLI 共用）
 
+// 基础工具函数
+export function add2(a: number, b: number): number {
+  return a + b
+}
+
 // 循环编排
 export { runAfkLoop, pickIssue } from './loop.js'
 export type { LoopEvent, LoopOptions } from './loop.js'
