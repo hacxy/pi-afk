@@ -139,36 +139,28 @@ afk 1
 
 ### 全局配置 `~/.afk/config.json`
 
+全局唯一配置源（跨所有项目共享），只保留 4 个用户真正会改的字段：
+
 ```jsonc
 {
   "image": "pi-afk:latest", // 沙箱镜像名
   "model": "deepseek/deepseek-v4-flash", // 沙箱 agent 模型（pi 的 provider/model 格式）
   "label": "afk", // 拉取 issue 的标签
-  "logDir": "~/.afk/logs", // 日志目录
-  "completionSignal": "<promise>COMPLETE</promise>", // 完成信号
-  "promptFile": "~/my-prompts/ralph.md", // 可选：自定义提示词模板路径
   "autoMerge": false, // 可选：done 后自动 squash 合并 PR
 }
 ```
 
-### 项目配置 `.afkrc.json`（可选）
-
-```jsonc
-{
-  "label": "afk", // 覆盖全局 label
-}
-```
+> 其余行为项硬编码为代码常量：日志目录固定 `~/.afk/logs`，完成信号固定 `<promise>COMPLETE</promise>`。旧配置中的其他字段（如 `logDir`/`completionSignal`/`promptFile`）会被忽略且不报错。
 
 ---
 
 ## 提示词模板
 
-模板决定沙箱内 agent 的行为。三层覆盖机制：
+模板决定沙箱内 agent 的行为。两层覆盖机制：
 
 ```
 优先级 1   ~/.afk/prompts/ralph.md      ← 全局自定义（所有项目生效）
-优先级 2   config.json 的 promptFile    ← 指定任意路径
-优先级 3   包内 prompts/ralph.md        ← 默认（sandcastle 官方模板中文翻译）
+优先级 2   包内 prompts/ralph.md        ← 默认（sandcastle 官方模板中文翻译）
 ```
 
 ### 占位符

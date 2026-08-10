@@ -5,13 +5,8 @@ export { runAfkLoop, pickIssue } from './loop.js'
 export type { LoopEvent, LoopOptions } from './loop.js'
 
 // 配置
-export {
-  loadGlobalConfig,
-  loadProjectConfig,
-  globalConfigPath,
-  ensureGlobalDirs,
-} from './config.js'
-export type { GlobalConfig, ProjectConfig } from './config.js'
+export { loadGlobalConfig, globalConfigPath, ensureGlobalDirs } from './config.js'
+export type { GlobalConfig } from './config.js'
 
 // 凭据
 export { getDeepseekKey, requireDeepseekKey } from './credentials.js'

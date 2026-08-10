@@ -5,6 +5,8 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 
+import { COMPLETION_SIGNAL } from './config.js'
+
 /**
  * 结构化输出协议（共识 B1）：
  * agent 在 <outcome> 标签中输出合法 JSON，宿主据此决定后续动作。
@@ -35,8 +37,6 @@ export interface RunIssueOptions {
   promptArgs: Record<string, string>
   /** 运行日志路径（全局 ~/.afk/logs/ 下，共识 F2） */
   logPath: string
-  /** 完成信号 */
-  completionSignal: string
   /** 无输出超时（秒） */
   idleTimeoutSeconds?: number
 }
@@ -117,7 +117,7 @@ export async function runIssueInSandbox(opts: RunIssueOptions): Promise<RunIssue
     hooks,
     promptFile: opts.promptFile,
     promptArgs: opts.promptArgs,
-    completionSignal: opts.completionSignal,
+    completionSignal: COMPLETION_SIGNAL,
     output: Output.object({ tag: 'outcome', schema: outcomeSchema }),
     maxIterations: 1,
     logging: { type: 'file', path: opts.logPath },
