@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# sandcastle runtime artifacts
+.sandcastle/.env
+.sandcastle/logs/
+.sandcastle/worktrees/
+
+# misc
+.DS_Store
+*.log

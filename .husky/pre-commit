@@ -1,0 +1,2 @@
+#!/bin/sh
+npx lint-staged --config lint-staged.config.mjs

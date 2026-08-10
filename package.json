@@ -1,0 +1,43 @@
+{
+  "name": "pi-afk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsup --watch",
+    "build": "tsup",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "prepare": "husky",
+    "verify:sandcastle": "tsx scripts/verify-sandcastle.ts"
+  },
+  "devDependencies": {
+    "@ai-hero/sandcastle": "^0.12.0",
+    "@hacxy/eslint-config": "^0.14.0",
+    "@hacxy/prettier-config": "^0.14.0",
+    "@hacxy/tsconfig": "^0.14.0",
+    "eslint": "^9.0.0",
+    "husky": "^9.0.0",
+    "lint-staged": "^15.0.0",
+    "prettier": "^3.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  },
+  "description": "TypeScript + tsup + Vitest"
+}
