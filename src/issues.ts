@@ -29,20 +29,23 @@ async function gh(args: string[], cwd?: string): Promise<string> {
   }
 }
 
-/** 拉取所有开放且带指定 label 的 issue（按编号升序） */
-export async function listAfkIssues(label: string): Promise<Issue[]> {
-  const out = await gh([
-    'issue',
-    'list',
-    '--state',
-    'open',
-    '--label',
-    label,
-    '--json',
-    'number,title,body,comments',
-  ])
-  const issues = JSON.parse(out) as Issue[]
-  return issues.sort((a, b) => a.number - b.number)
+/**
+ * 拉取所有开放 issue（按 labels 过滤：任一命中即 OR；空数组 = 不过滤，拉取全部）。按编号升序。
+ * 多标签用逐标签查询 + 按编号去重合并，而非 gh --search：
+ * search 走搜索索引有传播延迟（hacxy.cn #18 事故教训），list 端点即时一致。
+ */
+export async function listAfkIssues(labels: string[]): Promise<Issue[]> {
+  const base = ['issue', 'list', '--state', 'open', '--json', 'number,title,body,comments']
+  if (labels.length === 0) {
+    return (JSON.parse(await gh(base)) as Issue[]).sort((a, b) => a.number - b.number)
+  }
+  const byNumber = new Map<number, Issue>()
+  for (const label of labels) {
+    for (const issue of JSON.parse(await gh([...base, '--label', label])) as Issue[]) {
+      byNumber.set(issue.number, issue)
+    }
+  }
+  return [...byNumber.values()].sort((a, b) => a.number - b.number)
 }
 
 export async function commentOnIssue(issueNumber: number, body: string): Promise<void> {

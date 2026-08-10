@@ -161,7 +161,6 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
 export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
   const events: LoopEvent[] = []
   const skipped = new Set<number>()
-  const label = opts.config.label
 
   for (let i = 1; i <= opts.iterations; i++) {
     events.push({ type: 'iteration-start', iteration: i, total: opts.iterations })
@@ -169,7 +168,7 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
 
     let issues: Issue[]
     try {
-      issues = await listAfkIssues(label)
+      issues = await listAfkIssues(opts.config.labels)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       events.push({ type: 'error', message })

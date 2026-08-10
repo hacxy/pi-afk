@@ -36,7 +36,7 @@
 ```
 宿主（你的机器）                          沙箱（Docker 容器，零凭据）
 ─────────────────────                    ─────────────────────────────
-1. 拉取开放 issue（--label afk）
+1. 拉取开放 issue（按配置 labels 过滤；未配置 = 不过滤全部拉取）
 2. 按编号升序取第一个
 3. 创建独立分支 agent/issue-N
    （git worktree，不影响你的工作区）
@@ -142,7 +142,7 @@ cd 你的项目 && afk doctor
 配置（生效合并值）:
   image:     pi-afk:latest
   model:     deepseek/deepseek-v4-flash
-  label:     afk
+  labels:    （无——不过滤）
   autoMerge: off
 
 模板: /path/to/.sandcastle/prompt.md （项目自定义）
@@ -172,10 +172,12 @@ cd 你的项目 && afk doctor
 {
   "image": "pi-afk:latest", // 沙箱镜像名
   "model": "deepseek/deepseek-v4-flash", // 沙箱 agent 模型（pi 的 provider/model 格式）
-  "label": "afk", // 拉取 issue 的标签
+  "labels": [], // 拉取 issue 的标签（数组，任一命中即拉取；空数组 = 不过滤全部拉取）
   "autoMerge": false, // 可选：done 后自动 squash 合并 PR
 }
 ```
+
+> 旧配置的 `label`（字符串或数组）字段会被自动迁移为 `labels` 数组，无需手动改。
 
 > 其余行为项硬编码为代码常量：日志目录固定 `~/.afk/logs`，完成信号固定 `<promise>COMPLETE</promise>`。旧配置中的其他字段（如 `logDir`/`completionSignal`/`promptFile`）会被忽略且不报错。
 
@@ -220,7 +222,7 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
               └─ AFK 切片  → --label afk（pi-afk 自动实现 + 合并）
 ```
 
-- **AFK 切片**：`gh issue create ... --label afk`，pi-afk 自动实现、开 PR、可自动合并
+- **AFK 切片**：`gh issue create ... --label afk`，pi-afk 自动实现、开 PR、可自动合并（`afk` 需在配置 `labels` 中）
 - **HITL 切片**：`--label hitl`，pi-afk 不拉取；即使误标 `afk`，正文中的 `## 类型（Type）\n\nHITL` 标记也会被识别并跳过，`no-more-tasks` 事件会报告待人工处理的数量
 - **依赖顺序**：skill 按依赖顺序创建 issue，pi-afk 按编号升序处理，天然对齐
 
@@ -284,14 +286,14 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 
 ## 故障排查
 
-| 现象                                                    | 原因                          | 解决                                                           |
-| ------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------- |
-| `Authentication Fails ... api key invalid`              | DEEPSEEK_API_KEY 未设置或无效 | `echo $DEEPSEEK_API_KEY` 确认；从平台重新生成                  |
-| `完成：没有可处理的开放 issue`                          | 没有带 label 的开放 issue     | `gh issue list --label afk` 查看；检查 label 名与配置一致      |
-| `Structured output tag <outcome> contains invalid JSON` | agent 输出不符合协议          | 查看 `~/.afk/logs/issue-N.log` 尾部；通常是模型/网络问题，重试 |
-| 镜像构建失败                                            | Docker/OrbStack 未运行        | 启动 OrbStack 后重试 `afk init`                                |
-| git push rejected (non-fast-forward)                    | issue 已处理过（旧分支残留）  | 合并/关闭旧 PR 和 issue；删除本地 `agent/issue-N` 分支         |
-| 沙箱内测试失败（平台二进制）                            | 宿主 node_modules 跨平台      | pnpm 项目已自动解决；npm/yarn 项目靠增量 install 修复          |
+| 现象                                                    | 原因                          | 解决                                                                                           |
+| ------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `Authentication Fails ... api key invalid`              | DEEPSEEK_API_KEY 未设置或无效 | `echo $DEEPSEEK_API_KEY` 确认；从平台重新生成                                                  |
+| `完成：没有可处理的开放 issue`                          | 没有符合条件的开放 issue      | `gh issue list` 查看；配置了 labels 时检查标签名与配置一致，未配置时检查是否确实没有开放 issue |
+| `Structured output tag <outcome> contains invalid JSON` | agent 输出不符合协议          | 查看 `~/.afk/logs/issue-N.log` 尾部；通常是模型/网络问题，重试                                 |
+| 镜像构建失败                                            | Docker/OrbStack 未运行        | 启动 OrbStack 后重试 `afk init`                                                                |
+| git push rejected (non-fast-forward)                    | issue 已处理过（旧分支残留）  | 合并/关闭旧 PR 和 issue；删除本地 `agent/issue-N` 分支                                         |
+| 沙箱内测试失败（平台二进制）                            | 宿主 node_modules 跨平台      | pnpm 项目已自动解决；npm/yarn 项目靠增量 install 修复                                          |
 
 ---
 
@@ -305,7 +307,7 @@ pnpm lint        # eslint
 pnpm exec tsc --noEmit   # 类型检查
 ```
 
-**端到端验证流程**（真实跑通）：在测试仓库创建带 `afk` label 的 issue → `node dist/cli.js 1` → 观察沙箱 agent 工作 → 验证 PR 创建。
+**端到端验证流程**（真实跑通）：在测试仓库创建 issue（配置了 labels 则带对应标签）→ `node dist/cli.js 1` → 观察沙箱 agent 工作 → 验证 PR 创建。
 
 ### 路线图（未实现）
 

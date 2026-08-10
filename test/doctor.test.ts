@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
-import { DEFAULT_GLOBAL_CONFIG } from '../src/config'
-import { doctorReport, startupTemplateLine, type DoctorFacts } from '../src/doctor'
-import { promptFilePath } from '../src/prompts'
+import { DEFAULT_GLOBAL_CONFIG } from '../src/config.js'
+import { doctorReport, startupTemplateLine, type DoctorFacts } from '../src/doctor.js'
+import { promptFilePath } from '../src/prompts.js'
 
 const makeFacts = (overrides: Partial<DoctorFacts> = {}): DoctorFacts => ({
   config: { ...DEFAULT_GLOBAL_CONFIG },
@@ -23,7 +23,7 @@ describe('doctorReport', () => {
         config: {
           image: 'pi-afk:test',
           model: 'custom/model',
-          label: 'custom-label',
+          labels: ['custom-label'],
           autoMerge: true,
         },
       }),
@@ -32,7 +32,7 @@ describe('doctorReport', () => {
     expect(report).toContain('pi-afk:test')
     expect(report).toContain('model:')
     expect(report).toContain('custom/model')
-    expect(report).toContain('label:')
+    expect(report).toContain('labels:')
     expect(report).toContain('custom-label')
     expect(report).toContain('autoMerge: on')
   })
@@ -72,7 +72,8 @@ describe('doctorReport', () => {
     const report = doctorReport(makeFacts({ imageExists: false, ghLoggedIn: false }))
     expect(report).toContain(DEFAULT_GLOBAL_CONFIG.image)
     expect(report).toContain(DEFAULT_GLOBAL_CONFIG.model)
-    expect(report).toContain(DEFAULT_GLOBAL_CONFIG.label)
+    expect(report).toContain('labels:')
+    expect(report).toContain('无——不过滤')
     expect(report).toContain(promptFilePath())
     expect(report).toContain('不存在')
     expect(report).toContain('未登录')

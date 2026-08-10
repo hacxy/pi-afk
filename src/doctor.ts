@@ -65,7 +65,7 @@ export function doctorReport(facts: DoctorFacts): string {
     '配置（生效合并值）:',
     `  image:     ${config.image}`,
     `  model:     ${config.model}`,
-    `  label:     ${config.label}`,
+    `  labels:    ${config.labels.length > 0 ? config.labels.join(', ') : '（无——不过滤）'}`,
     `  autoMerge: ${config.autoMerge ? 'on' : 'off'}`,
     '',
     `模板: ${templatePath} ${sourceLabel}`,

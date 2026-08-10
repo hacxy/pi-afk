@@ -23,7 +23,7 @@ import { dockerBuildArgs, hostPnpmVersion } from './sandbox.js'
 const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
 
 用法:
-  afk <迭代次数>        在当前项目目录运行 AFK 循环（处理带 label 的开放 issue）
+  afk <迭代次数>        在当前项目目录运行 AFK 循环（处理开放 issue；配置了 labels 则按标签过滤，默认不过滤）
   afk init              初始化：构建沙箱镜像、生成全局配置、复制项目模板、检查凭据
   afk doctor            诊断：生效配置 / 模板路径 / 镜像与 gh 状态（纯只读，无副作用）
   afk --help            显示帮助
@@ -32,7 +32,7 @@ const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
   DEEPSEEK_API_KEY      deepseek API key（必填）
 
 配置:
-  全局: ~/.afk/config.json（image / model / label / autoMerge）
+  全局: ~/.afk/config.json（image / model / labels / autoMerge）
 
 模板:
   项目 .sandcastle/prompt.md（自定义，可提交 git）> 包内默认 prompts/prompt.md
