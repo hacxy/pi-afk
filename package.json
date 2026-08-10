@@ -1,10 +1,14 @@
 {
-  "name": "pi-afk",
-  "version": "0.0.0",
+  "name": "@hacxy/pi-afk",
+  "version": "0.1.0",
+  "description": "AFK loop orchestrator for the pi coding agent, built on sandcastle",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "afk": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -12,7 +16,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "prompts",
+    "Dockerfile"
   ],
   "scripts": {
     "dev": "tsup --watch",
@@ -22,14 +28,17 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
-    "prepare": "husky",
-    "verify:sandcastle": "tsx scripts/verify-sandcastle.ts"
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@ai-hero/sandcastle": "^0.12.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@ai-hero/sandcastle": "^0.12.0",
     "@hacxy/eslint-config": "^0.14.0",
     "@hacxy/prettier-config": "^0.14.0",
     "@hacxy/tsconfig": "^0.14.0",
+    "@types/node": "^26.2.0",
     "eslint": "^9.0.0",
     "husky": "^9.0.0",
     "lint-staged": "^15.0.0",
@@ -38,6 +47,5 @@
     "tsx": "^4.23.12",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
-  },
-  "description": "TypeScript + tsup + Vitest"
+  }
 }
