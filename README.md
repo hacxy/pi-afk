@@ -38,20 +38,22 @@
 ─────────────────────                    ─────────────────────────────
 1. 拉取开放 issue（按配置 labels 过滤；未配置 = 不过滤全部拉取）
 2. 按编号升序取第一个
-3. 创建独立分支 agent/issue-N
-   （git worktree，不影响你的工作区）
-4. 组装 prompt（模板 + issue 内容）
-                                         5. 启动容器（镜像 pi-afk:latest）
-                                         6. 按 lockfile 类型处理依赖
+3. 宿主刷新 origin/main
+   （git fetch origin main；失败时降级本地 HEAD，不阻断）
+4. 创建独立分支 agent/issue-N
+   （git worktree，从最新 origin/main 创建，不影响你的工作区）
+5. 组装 prompt（模板 + issue 内容）
+                                         6. 启动容器（镜像 pi-afk:latest）
+                                         7. 按 lockfile 类型处理依赖
                                             · pnpm：共享宿主 store 秒级重建
                                             · npm/yarn：复制 node_modules + 增量安装
-                                         7. 运行 pi agent：
+                                         8. 运行 pi agent：
                                             探索 → 计划 → TDD 实现
                                             → 验证（typecheck + test）
                                             → 提交（只提交，不 push）
-                                         8. 输出 <promise>COMPLETE</promise>
+                                         9. 输出 <promise>COMPLETE</promise>
                                             和结构化 <outcome>{status, summary}
-9. 解析 outcome：
+10. 解析 outcome：
    · done + 有提交 → push 分支 → 创建 PR
      （PR body 含 "Closes #N"，合并后
        GitHub 自动关闭 issue）
@@ -263,7 +265,7 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 - **每次 issue 的沙箱日志**：`~/.afk/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）
 - **事件流**：`~/.afk/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
 
-日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result` / `no-more-tasks` / `error`。
+日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
 
 ---
 
