@@ -28,7 +28,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
-    "prepare": "husky"
+    "prepare": "husky",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ai-hero/sandcastle": "^0.12.0",

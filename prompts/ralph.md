@@ -25,7 +25,7 @@
    - 以 `Ralph: issue-{{ISSUE_NUMBER}}` 结尾（进度锚点）
    - 说明完成了什么、关键决策、改动的文件
    - 若提交报 "Author identity unknown"，先运行：
-     `git config user.name "Ralph"` 和 `git config user.email "ralph@localhost"`（仅影响当前 worktree）
+     `git config user.name "hacxy"` 和 `git config user.email "hacxy.js@outlook.com"`（仅影响当前 worktree）
 
 ## 规则
 

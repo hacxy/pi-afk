@@ -8,6 +8,8 @@ import {
   createPullRequest,
   pushBranch,
   recentRalphCommits,
+  isHitlIssue,
+  mergePullRequest,
   type Issue,
 } from './issues.js'
 import { appendLog } from './log.js'
@@ -30,7 +32,8 @@ export type LoopEvent =
     }
   | { type: 'issue-commented'; issue: Issue; reason: string }
   | { type: 'pull-request'; issue: Issue; url: string; prNumber: number }
-  | { type: 'no-more-tasks' }
+  | { type: 'issue-merged'; issue: Issue; prNumber: number }
+  | { type: 'no-more-tasks'; hitlPending: number }
   | { type: 'max-iterations-reached'; iteration: number }
   | { type: 'error'; message: string; issue?: Issue }
 
@@ -51,9 +54,14 @@ export interface LoopOptions {
 
 export function pickIssue(issues: Issue[], skipped: Set<number>): Issue | null {
   const candidates = issues
-    .filter((i) => !skipped.has(i.number))
+    .filter((i) => !skipped.has(i.number) && !isHitlIssue(i))
     .sort((a, b) => a.number - b.number)
   return candidates[0] ?? null
+}
+
+/** 统计待人工处理的 HITL 切片数 */
+export function countHitlPending(issues: Issue[]): number {
+  return issues.filter(isHitlIssue).length
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +118,12 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
           projectDir: opts.projectDir,
         })
         events.push({ type: 'pull-request', issue, url: pr.url, prNumber: pr.number })
+
+        // AFK 切片语义：启用 autoMerge 时自动 squash 合并（合并后 GitHub 自动关 issue）
+        if (opts.config.autoMerge) {
+          await mergePullRequest({ prNumber: pr.number, projectDir: opts.projectDir })
+          events.push({ type: 'issue-merged', issue, prNumber: pr.number })
+        }
         break
       }
       case 'blocked':
@@ -167,8 +181,10 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
 
     const issue = pickIssue(issues, skipped)
     if (!issue) {
-      events.push({ type: 'no-more-tasks' })
-      appendLog(opts.config.logDir, { type: 'no-more-tasks' })
+      // 没有可自动处理的 issue 时，告知待人工的 HITL 切片数
+      const hitlPending = countHitlPending(issues)
+      events.push({ type: 'no-more-tasks', hitlPending })
+      appendLog(opts.config.logDir, { type: 'no-more-tasks', hitlPending })
       break
     }
 

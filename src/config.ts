@@ -18,6 +18,8 @@ export interface GlobalConfig {
   completionSignal: string
   /** 自定义提示词模板路径（默认用包内 prompts/ralph.md） */
   promptFile?: string
+  /** 完成后自动合并 PR（默认关闭，保守；AFK 切片语义下可开启） */
+  autoMerge?: boolean
 }
 
 export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {

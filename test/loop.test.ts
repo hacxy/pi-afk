@@ -2,12 +2,13 @@ import type { Issue } from '../src/issues'
 
 import { describe, it, expect } from 'vitest'
 
+import { isHitlIssue } from '../src/issues'
 import { pickIssue } from '../src/loop'
 
-const makeIssue = (number: number): Issue => ({
+const makeIssue = (number: number, body = 'body'): Issue => ({
   number,
   title: `issue ${number}`,
-  body: 'body',
+  body,
   comments: [],
 })
 
@@ -25,5 +26,22 @@ describe('pickIssue', () => {
 
   it('空列表返回 null', () => {
     expect(pickIssue([], new Set())).toBeNull()
+  })
+
+  it('跳过 HITL 切片（防 label 误用）', () => {
+    const afk = makeIssue(1)
+    const hitl = makeIssue(2, '## 类型（Type）\n\nHITL')
+    const issues = [hitl, afk]
+    expect(pickIssue(issues, new Set())?.number).toBe(1)
+    expect(pickIssue([hitl], new Set())).toBeNull()
+  })
+})
+
+describe('isHitlIssue', () => {
+  it('识别中文/英文 HITL 标记', () => {
+    expect(isHitlIssue(makeIssue(1, '## 类型（Type）\n\nHITL'))).toBe(true)
+    expect(isHitlIssue(makeIssue(2, '## Type\n\nHITL'))).toBe(true)
+    expect(isHitlIssue(makeIssue(3, '## 类型（Type）\n\nAFK'))).toBe(false)
+    expect(isHitlIssue(makeIssue(4, '普通 issue'))).toBe(false)
   })
 })

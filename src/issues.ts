@@ -68,6 +68,21 @@ export async function pushBranch(branch: string, projectDir: string): Promise<vo
   }
 }
 
+/** HITL 切片识别：标题/正文含「类型（Type）」字段 + HITL 值（防 label 误用） */
+export function isHitlIssue(issue: Pick<Issue, 'body' | 'title'>): boolean {
+  const text = `${issue.title}\n${issue.body}`
+  // 兼容三种写法：## 类型（Type）\n\nHITL / ## Type\n\nHITL / 类型：HITL
+  return /(?:类型\s*[（(]?Type[）)]?|类型|Type)\s*[:：]?\s*\n*\s*HITL/i.test(text)
+}
+
+/** 合并 PR（squash + 删分支；PR body 的 Closes #N 会自动关 issue） */
+export async function mergePullRequest(opts: {
+  prNumber: number
+  projectDir: string
+}): Promise<void> {
+  await gh(['pr', 'merge', String(opts.prNumber), '--squash', '--delete-branch'], opts.projectDir)
+}
+
 /** 用 PR body 里的 "Closes #N" 实现合并时自动关 issue（共识 B2） */
 export async function createPullRequest(opts: {
   branch: string
