@@ -26,8 +26,7 @@
    - 使用 Conventional Commits 格式
    - 以 `Ralph: issue-{{ISSUE_NUMBER}}` 结尾（进度锚点）
    - 说明完成了什么、关键决策、改动的文件
-   - 提交前先运行：
-     `git config user.name "hacxy"` 和 `git config user.email "hacxy.js@outlook.com"`
+     （git 身份已由宿主自动注入，无需手动配置）
 
 # 提交
 

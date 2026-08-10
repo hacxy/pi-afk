@@ -116,8 +116,9 @@ afk 10        # 处理 10 个开放 issue（没有则立即结束）
 
 1. 生成全局配置 `~/.afk/config.json`（跨所有项目共享）
 2. 检查/构建沙箱镜像 `pi-afk:latest`（全局一次，所有项目复用）
-3. 向项目 `.gitignore` 追加 `.sandcastle/`（幂等）
-4. 检查 DEEPSEEK_API_KEY，缺失则明确报错
+3. 向项目 `.gitignore` 追加 sandcastle 运行时产物忽略规则（幂等，`prompt.md` 可提交）
+4. 幂等复制默认模板到项目 `.sandcastle/prompt.md`（已存在则跳过）
+5. 检查 DEEPSEEK_API_KEY，缺失则明确报错
 
 **在项目里创建第一个任务**：
 
@@ -156,11 +157,11 @@ afk 1
 
 ## 提示词模板
 
-模板决定沙箱内 agent 的行为。两层覆盖机制：
+采用 **sandcastle 官方标准**：模板文件固定为项目 `.sandcastle/prompt.md`。自定义提示词模板只有一条规则：**把模板文件放到项目 `.sandcastle/prompt.md`（可提交 git，团队共享）**；没有则用包内内置默认模板。
 
 ```
-优先级 1   ~/.afk/prompts/ralph.md      ← 全局自定义（所有项目生效）
-优先级 2   包内 prompts/ralph.md        ← 默认（sandcastle 官方模板中文翻译）
+优先级 1   项目 .sandcastle/prompt.md   ← 用户自定义（可提交 git，团队共享）
+优先级 2   包内 prompts/prompt.md       ← 默认（sandcastle 官方 simple-loop 命名）
 ```
 
 ### 占位符
@@ -174,15 +175,12 @@ afk 1
 | `{{RECENT_COMMITS}}` | 最近 10 条 Ralph 提交（进度锚点） |
 | `{{BRANCH}}`         | 当前分支名                        |
 
-### 官方模板参考（一手来源）
+占位符注入是宿主侧行为（pi-afk 相对 sandcastle 官方“沙箱内执行 gh 命令”的差异化价值），模板可直接使用 `{{KEY}}`。
 
-sandcastle 仓库内置了完整的官方模板集，是最佳参考：
+### 初始化与 git 身份
 
-- 实现模板：`mattpocock/sandcastle/.sandcastle/agent-workflows/implement/prompt.md`
-- 完整模板集：`.sandcastle/agent-workflows/{implement,review,plan,merge,explore}/prompt.md`
-- 编码规范：`.sandcastle/CODING_STANDARDS.md`
-
-自定义流程：复制官方模板到 `~/.afk/prompts/`，按你的项目修改即可。
+- `afk init`（或首次运行）会幂等地把默认模板复制到项目 `.sandcastle/prompt.md` 作为可编辑起点；已存在则跳过，不覆盖你的修改
+- 沙箱内 agent 的 git commit 自动使用宿主的 `user.name`/`user.email`（sandcastle 从宿主 git config 读取并注入沙箱），模板无需（也不应）硬编码身份
 
 ---
 
