@@ -1,9 +1,9 @@
-import type { Issue } from '../src/issues'
+import type { Issue } from '../src/issues.js'
 
 import { describe, it, expect } from 'vitest'
 
-import { isHitlIssue } from '../src/issues'
-import { pickIssue } from '../src/loop'
+import { isHitlIssue } from '../src/issues.js'
+import { pickIssue } from '../src/loop.js'
 
 const makeIssue = (number: number, body = 'body'): Issue => ({
   number,

@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /**
- * 全局配置（~/.afk/config.json）——全局唯一配置源（共识 T2）。
+ * 全局配置（~/.afk/config.json）——全局唯一配置源（无项目级配置层）。
  * 只保留用户真正会改的 4 个字段，其余行为项（logDir / completionSignal）硬编码为代码常量。
  */
 export interface GlobalConfig {

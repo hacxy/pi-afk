@@ -16,7 +16,7 @@ import { resolvePromptFile, buildIssuePromptArgs } from './prompts.js'
 import { runIssueInSandbox, type Outcome } from './sandbox.js'
 
 // ---------------------------------------------------------------------------
-// 事件模型（共识 F3：结构化事件数组，为并行与 Web UI 预留）
+// 事件模型：结构化事件数组，为并行与 Web UI 预留
 // ---------------------------------------------------------------------------
 
 export type LoopEvent =
@@ -155,7 +155,7 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
 }
 
 // ---------------------------------------------------------------------------
-// 主循环（串行，共识 A1）
+// 主循环（串行：一次只处理一个 issue，结果顺序清晰可追踪）
 // ---------------------------------------------------------------------------
 
 export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {

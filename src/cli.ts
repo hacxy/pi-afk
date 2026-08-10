@@ -102,10 +102,15 @@ function ensureProjectTemplate(projectDir: string): void {
   console.log(`✓ 项目模板就绪: ${path}（可编辑后提交 git，团队共享）`)
 }
 
-/** 运行时前置检查（afk <N> 每次自动执行，无需手动 init） */
-function ensureRuntime(cfg: GlobalConfig, projectDir: string): boolean {
+/** 全局环境就绪（幂等）：生成全局配置 + 确保日志目录；init 与运行时自动初始化共用的唯一入口 */
+function ensureGlobalEnv(): void {
   ensureGlobalConfig()
   ensureGlobalDirs()
+}
+
+/** 运行时前置检查（afk <N> 每次自动执行，无需手动 init） */
+function ensureRuntime(cfg: GlobalConfig, projectDir: string): boolean {
+  ensureGlobalEnv()
   ensureSandcastleGitignore(projectDir)
   ensureProjectTemplate(projectDir)
   if (!requireDeepseekKey()) {
@@ -117,9 +122,8 @@ function ensureRuntime(cfg: GlobalConfig, projectDir: string): boolean {
 async function initCmd(projectDir: string): Promise<void> {
   const cfg = loadGlobalConfig()
 
-  // 1. 全局配置
-  ensureGlobalConfig()
-  ensureGlobalDirs()
+  // 1. 全局环境（配置 + 日志目录）
+  ensureGlobalEnv()
 
   // 2. deepseek key
   try {

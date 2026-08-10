@@ -74,7 +74,7 @@ export async function mergePullRequest(opts: {
   await gh(['pr', 'merge', String(opts.prNumber), '--squash', '--delete-branch'], opts.projectDir)
 }
 
-/** 用 PR body 里的 "Closes #N" 实现合并时自动关 issue（共识 B2） */
+/** 用 PR body 里的 "Closes #N" 实现合并时自动关 issue */
 export async function createPullRequest(opts: {
   branch: string
   title: string
