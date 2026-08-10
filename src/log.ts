@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
- * 全局结构化日志（JSON lines），为将来 Web UI 做数据源（共识 F2/F3）。
+ * 全局结构化日志（JSON lines），为将来 Web UI 做数据源。
  * 每个事件一行 JSON，方便后续按类型/时间过滤。
  */
 export interface LogEntry {

@@ -9,7 +9,7 @@ import {
   promptFilePath,
   ensureProjectPrompt,
   ensureSandcastleGitignore,
-} from '../src/prompts'
+} from '../src/prompts.js'
 
 let dir: string
 beforeEach(() => {

@@ -9,7 +9,7 @@ import {
   LOG_DIR,
   COMPLETION_SIGNAL,
   ensureGlobalDirs,
-} from '../src/config'
+} from '../src/config.js'
 
 let dir: string
 beforeEach(() => {

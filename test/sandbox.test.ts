@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it, expect } from 'vitest'
 
-import { hostPnpmVersion, dockerBuildArgs } from '../src/sandbox'
+import { hostPnpmVersion, dockerBuildArgs } from '../src/sandbox.js'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 

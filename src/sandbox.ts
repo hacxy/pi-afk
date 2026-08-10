@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { COMPLETION_SIGNAL } from './config.js'
 
 /**
- * 结构化输出协议（共识 B1）：
+ * 结构化输出协议：
  * agent 在 <outcome> 标签中输出合法 JSON，宿主据此决定后续动作。
  * 校验失败时 sandcastle 会自动重试（resume session + 反馈错误）。
  */
@@ -35,7 +35,7 @@ export interface RunIssueOptions {
   promptFile: string
   /** 注入 prompt 的参数 */
   promptArgs: Record<string, string>
-  /** 运行日志路径（全局 ~/.afk/logs/ 下，共识 F2） */
+  /** 运行日志路径（全局 ~/.afk/logs/ 下） */
   logPath: string
   /** 无输出超时（秒） */
   idleTimeoutSeconds?: number
@@ -49,7 +49,7 @@ export interface RunIssueResult {
 
 /**
  * 在沙箱中执行单个 issue。
- * - 每个 issue 独立分支（branch 模式，共识 A2）
+ * - 每个 issue 独立分支（branch 模式，互不干扰）
  * - 沙箱零凭据（只注入 DEEPSEEK_API_KEY，保守派）
  * - agent 只提交，push/PR/关 issue 由宿主完成
  */
