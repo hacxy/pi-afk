@@ -1,3 +1,7 @@
+export function hello(name: string): string {
+  return `Hello, ${name}!`
+}
+
 export function greet(name: string): string {
   return `Hello, ${name}!`
 }
