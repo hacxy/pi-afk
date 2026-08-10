@@ -5,7 +5,7 @@
 你在 GitHub 上创建带 `afk` 标签的 issue，pi-afk 自动完成剩下的：
 
 ```
-创建 issue → 沙箱内 agent 实现 → 自动提交 → 推送分支 → 开 PR → （可选）自动合并 → issue 自动关闭
+创建 issue → 沙箱内 agent 实现 → 自动提交 → 预同步合并 → 推送分支 → 开 PR → （可选）自动合并 → issue 自动关闭
 ```
 
 整个循环无人值守（AFK = away from keyboard），你可以放心离开。**沙箱保守派设计**：凭据、push、PR 全部由宿主机完成，沙箱内的 agent 只接触隔离的工作副本。
@@ -54,14 +54,22 @@
                                          9. 输出 <promise>COMPLETE</promise>
                                             和结构化 <outcome>{status, summary}
 10. 解析 outcome：
-   · done + 有提交 → push 分支 → 创建 PR
+   · done + 有提交 → 预同步 + push 分支 + 创建 PR
      （PR body 含 "Closes #N"，合并后
        GitHub 自动关闭 issue）
-   · 配置了 verifyCommand 时 → push 前在
-     分支临时 worktree 执行验证命令：
-       零退出 → 正常发布
-       非零退出 → 留言说明验证失败、
-       不 push 不发版、该 issue 本轮停止
+     · 预同步（T11）：push 前宿主把最新
+       origin/main 合并进分支（分支 worktree
+       内执行 git merge，宿主操作）：
+        合并干净 → 继续发布
+        合并冲突 → 中止合并、分支照常推送 +
+        建 PR + PR 留言冲突文件清单与下一步
+        建议（不自动合并），该 issue 本轮跳过
+     · 配置了 verifyCommand 时 → 预同步后、
+       push 前在分支临时 worktree 执行验证
+       （校验合并后状态）：
+        零退出 → 正常发布
+        非零退出 → 留言说明验证失败、
+        不 push 不发版、该 issue 本轮停止
    · done + 无提交 → 留言警告，不建 PR
    · blocked/skipped → issue 留言说明原因，
      本轮跳过
@@ -78,7 +86,8 @@
 - **进度锚点**：prompt 中注入最近 10 条 `Ralph:` 提交，让 agent 知道之前的进度
 - **依赖顺序**：issue 按编号升序处理 —— 配合按依赖顺序创建 issue 的规范，先被依赖的先实现
 - **合并重试**：autoMerge 合并失败先等 30 秒重试一次（PR 刚创建时 GitHub 尚未算好可合并性），重试仍失败则报错并保留 gh 原始输出
-- **验证门（可选）**：配置 `verifyCommand`（如 `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test:run`）后，发布流水线在 push 前于分支临时 worktree 执行该命令（干净检出，随用随删，不依赖沙箱 worktree 生命周期），非零退出即停摆——留言说明验证失败、不发版、该 issue 本轮停止；默认不配置 = 信任 agent 声明（行为与现状一致）
+- **预同步合并（T11）**：agent 完成后、push 前，宿主把最新 `origin/main` 合并进分支（在分支临时 worktree 内执行 `git merge`，宿主操作、不涉沙箱凭据；sandcastle 干净 run 后会删除 worktree，故与验证门同一模式重建临时 worktree，不碰宿主主工作区）。合并干净 → 正常发布；合并冲突 → 中止合并还原分支、分支照常推送 + 创建 PR + **PR 留言冲突文件清单与下一步建议**（不留无声 dirty PR，hacxy.cn #23 事故教训）、不自动合并、该 issue 本轮跳过（不阻塞循环）
+- **验证门（可选）**：配置 `verifyCommand`（如 `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test:run`）后，发布流水线在预同步合并之后、push 之前于分支临时 worktree 执行该命令（干净检出，随用随删，不依赖沙箱 worktree 生命周期），校验的是将要推送的合并后状态，非零退出即停摆——留言说明验证失败、不发版、该 issue 本轮停止；默认不配置 = 信任 agent 声明（行为与现状一致）
 
 ---
 
@@ -277,7 +286,7 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 - **每次 issue 的沙箱日志**：`~/.afk/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）
 - **事件流**：`~/.afk/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
 
-日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
+日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result` / `presync-conflict` / `presync-fetch-failed` / `verify-failed` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
 
 ---
 

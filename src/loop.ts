@@ -32,6 +32,7 @@ export type LoopEvent =
   | { type: 'issue-commented'; issue: Issue; reason: string }
   | { type: 'pull-request'; issue: Issue; url: string; prNumber: number }
   | { type: 'issue-merged'; issue: Issue; prNumber: number }
+  | { type: 'presync-conflict'; issue: Issue; files: string[] }
   | { type: 'verify-failed'; issue: Issue; reason: string }
   | { type: 'no-more-tasks'; hitlPending: number }
   | { type: 'max-iterations-reached'; iteration: number }
@@ -125,10 +126,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           })
           break
         }
-        // 保守派：宿主统一推送 + 开 PR（凭据不进沙箱）；autoMerge 时由流水线自动 squash 合并。
-        // 验证门（issue #22）：配置了 verifyCommand 时，push 前在分支临时 worktree 执行验证，
-        // 非零退出抛 VerifyFailedError，由下方 catch 留言说明并停止本轮（不发版）
-        const { pr, merged } = await publishAndMerge({
+        // 预同步（issue #23）：push 前宿主把最新 origin/main 合并进分支（干净 → 正常发布；
+        // 冲突 → 分支照常推送 + PR 留言冲突清单，不 autoMerge、不抛错）。
+        // 验证门（issue #22）：配置了 verifyCommand 时，预同步后、push 前在分支临时 worktree
+        // 执行验证，非零退出抛 VerifyFailedError，由下方 catch 留言说明并停止本轮（不发版）
+        const { pr, merged, presyncConflict } = await publishAndMerge({
           branch,
           title: `fix: issue #${issue.number} ${issue.title}`.slice(0, 100),
           body: `由 Ralph / pi-afk 自动生成\n\n${outcome.summary}\n\nCloses #${issue.number}`,
@@ -137,6 +139,16 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           verifyCommand: opts.config.verifyCommand,
         })
         events.push({ type: 'pull-request', issue, url: pr.url, prNumber: pr.number })
+
+        // 预同步冲突：PR 已建 + 已留言冲突清单，待人工处理（该 issue 本轮跳过）
+        if (presyncConflict) {
+          events.push({ type: 'presync-conflict', issue, files: presyncConflict.files })
+          appendLog(LOG_DIR, {
+            type: 'presync-conflict',
+            issueNumber: issue.number,
+            files: presyncConflict.files,
+          })
+        }
 
         // AFK 切片语义：合并后 GitHub 自动关 issue（合并失败已由流水线重试，重试仍失败抛错）
         if (merged) {
@@ -230,7 +242,9 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
       (e): e is Extract<LoopEvent, { type: 'issue-outcome' }> => e.type === 'issue-outcome',
     )
     const verifyFailed = issueEvents.some((e) => e.type === 'verify-failed')
-    if (verifyFailed || (terminal && terminal.status !== 'done')) {
+    // 预同步冲突：PR 已建 + 已留言，待人工处理——本轮不再重复派发（不阻塞循环处理下一个 issue）
+    const presyncConflict = issueEvents.some((e) => e.type === 'presync-conflict')
+    if (verifyFailed || presyncConflict || (terminal && terminal.status !== 'done')) {
       skipped.add(issue.number)
     }
   }

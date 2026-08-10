@@ -55,14 +55,17 @@ function scriptExec(script: (file: string, args: string[]) => ScriptResult): voi
   })
 }
 
-/** 正常路径脚本：git log（进度锚点）→ git fetch（基线刷新）→ push → gh PR / 留言 */
+/** 正常路径脚本：git log（进度锚点）→ git fetch（基线刷新）→ 预同步（worktree 内 merge）→ push → gh PR / 留言 */
 const happyPath: (file: string, args: string[]) => ScriptResult = (file, args) => {
   if (file === 'git' && args[0] === 'log') return { stdout: 'abc123 2024-01-01 Ralph: seed' }
   if (file === 'git' && args[0] === 'fetch') return { stdout: '' }
+  if (file === 'git' && args[0] === 'merge') return { stdout: 'Merged' }
+  if (file === 'git' && args[0] === 'diff') return { stdout: '' }
   if (file === 'git' && args[0] === 'push') return { stdout: 'ok' }
   if (file === 'gh' && args[0] === 'pr' && args[1] === 'create') {
     return { stdout: 'https://github.com/hacxy/pi-afk/pull/42' }
   }
+  if (file === 'gh' && args[0] === 'pr' && args[1] === 'comment') return { stdout: '' }
   if (file === 'gh' && args[0] === 'issue' && args[1] === 'comment') return { stdout: '' }
   if (file === 'git' && args[0] === 'worktree') return { stdout: '' }
   return { error: new Error(`unexpected call: ${file} ${args.join(' ')}`) }
@@ -134,6 +137,47 @@ describe('processIssue 验证门（issue #22）', () => {
 
     expect(events.some((e) => e.type === 'pull-request')).toBe(true)
     expect(execFileMock.mock.calls.some(([file]) => file === '/bin/sh')).toBe(false)
+  })
+})
+
+describe('runAfkLoop 预同步冲突本轮跳过（issue #23）', () => {
+  it('冲突路径：照常建 PR + PR 留言冲突清单，本轮跳过该 issue（不阻塞循环）', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
+        return { stdout: JSON.stringify([issue22]) }
+      }
+      if (file === 'git' && args[0] === 'merge' && args[1] === '--no-edit') {
+        return {
+          error: Object.assign(new Error('merge conflict'), {
+            code: 1,
+            stderr: 'CONFLICT (content): Merge conflict in src/foo.ts',
+          }),
+        }
+      }
+      if (file === 'git' && args[0] === 'diff') {
+        return { stdout: 'src/foo.ts' }
+      }
+      if (file === 'git' && args[0] === 'merge' && args[1] === '--abort') {
+        return { stdout: '' }
+      }
+      return happyPath(file, args)
+    })
+
+    const events = await runAfkLoop(makeOpts())
+
+    // PR 照常创建；PR 留言包含冲突文件清单
+    expect(events.some((e) => e.type === 'pull-request')).toBe(true)
+    const prComment = execFileMock.mock.calls
+      .filter(([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'comment')
+      .flatMap(([, args]) => args)
+    expect(prComment.join(' ')).toMatch(/src\/foo\.ts/)
+    // 产生 presync-conflict 事件，且本轮不再拾取该 issue（→ no-more-tasks）
+    expect(events.find((e) => e.type === 'presync-conflict')).toMatchObject({
+      issue: issue22,
+      files: ['src/foo.ts'],
+    })
+    expect(events.filter((e) => e.type === 'issue-picked')).toHaveLength(1)
+    expect(events.some((e) => e.type === 'no-more-tasks')).toBe(true)
   })
 })
 
