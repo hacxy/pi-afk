@@ -184,6 +184,11 @@ function printEvents(events: LoopEvent[]): void {
       case 'issue-commented':
         console.log(`  留言: ${e.reason}`)
         break
+      case 'presync-conflict':
+        console.warn(
+          `  ⚠ 预同步冲突（issue #${e.issue.number}）: PR 已建并留言 ${e.files.length} 个冲突文件，待人工处理`,
+        )
+        break
       case 'verify-failed':
         console.error(`  ✗ 验证未通过，未发布（issue #${e.issue.number}）: ${e.reason}`)
         break

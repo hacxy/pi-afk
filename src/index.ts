@@ -15,12 +15,20 @@ export { getDeepseekKey, requireDeepseekKey } from './credentials.js'
 export {
   listAfkIssues,
   commentOnIssue,
+  commentOnPullRequest,
   pushBranch,
   createPullRequest,
   publishAndMerge,
+  buildPresyncConflictComment,
   recentRalphCommits,
 } from './issues.js'
-export type { Issue, PullRequest, PublishAndMergeOptions, PublishAndMergeResult } from './issues.js'
+export type {
+  Issue,
+  PullRequest,
+  PublishAndMergeOptions,
+  PublishAndMergeResult,
+  PresyncResult,
+} from './issues.js'
 
 // 沙箱执行
 export { runIssueInSandbox, outcomeSchema } from './sandbox.js'
