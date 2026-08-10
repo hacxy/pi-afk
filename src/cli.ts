@@ -17,7 +17,11 @@ import { requireDeepseekKey } from './credentials.js'
 import { collectDoctorFacts, doctorReport, startupTemplateLine } from './doctor.js'
 import { appendLog } from './log.js'
 import { runAfkLoop, type LoopEvent } from './loop.js'
-import { ensureProjectPrompt, ensureSandcastleGitignore } from './prompts.js'
+import {
+  ensureProjectPrompt,
+  ensureSandcastleGitignore,
+  ensureProjectResolvePrompt,
+} from './prompts.js'
 import { dockerBuildArgs, hostPnpmVersion } from './sandbox.js'
 
 const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
@@ -36,6 +40,7 @@ const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
 
 模板:
   项目 .sandcastle/prompt.md（自定义，可提交 git）> 包内默认 prompts/prompt.md
+  项目 .sandcastle/resolve.md（冲突自动化解，可提交 git）> 包内默认 prompts/resolve.md
 `
 
 // ---------------------------------------------------------------------------
@@ -98,10 +103,12 @@ function ensureImage(cfg: GlobalConfig): boolean {
   }
 }
 
-/** 项目模板：幂等复制默认模板到 .sandcastle/prompt.md（已存在则跳过） */
+/** 项目模板：幂等复制默认模板到 .sandcastle/prompt.md 与 .sandcastle/resolve.md（已存在则跳过） */
 function ensureProjectTemplate(projectDir: string): void {
   const path = ensureProjectPrompt(projectDir)
   console.log(`✓ 项目模板就绪: ${path}（可编辑后提交 git，团队共享）`)
+  const resolvePath = ensureProjectResolvePrompt(projectDir)
+  console.log(`✓ resolve 模板就绪: ${resolvePath}（预同步冲突自动化解）`)
 }
 
 /** 全局环境就绪（幂等）：生成全局配置 + 确保日志目录；init 与运行时自动初始化共用的唯一入口 */
@@ -202,7 +209,12 @@ function printEvents(events: LoopEvent[]): void {
         break
       case 'presync-conflict':
         console.warn(
-          `  ⚠ 预同步冲突（issue #${e.issue.number}）: PR 已建并留言 ${e.files.length} 个冲突文件，待人工处理`,
+          `  ⚠ 预同步冲突（issue #${e.issue.number}）: ${e.files.length} 个冲突文件，派发 resolve run 自动解冲突`,
+        )
+        break
+      case 'resolve-failed':
+        console.warn(
+          `  ✗ 自动解冲突失败（issue #${e.issue.number}）: ${e.reason}——已回退兜底（push + PR + 冲突留言）`,
         )
         break
       case 'verify-failed':

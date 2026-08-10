@@ -1,3 +1,5 @@
+import type { Issue } from '../src/issues.js'
+
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,6 +11,10 @@ import {
   promptFilePath,
   ensureProjectPrompt,
   ensureSandcastleGitignore,
+  resolveResolvePromptFile,
+  resolvePromptFilePath,
+  ensureProjectResolvePrompt,
+  buildResolvePromptArgs,
 } from '../src/prompts.js'
 
 let dir: string
@@ -49,6 +55,74 @@ describe('ensureProjectPrompt', () => {
     writeFileSync(target, '# 用户自定义版本\n')
     expect(ensureProjectPrompt(dir)).toBe(target)
     expect(readFileSync(target, 'utf8')).toBe('# 用户自定义版本\n')
+  })
+})
+
+describe('resolve 模板（T13 冲突自动化解）', () => {
+  const issue: Issue = {
+    number: 25,
+    title: 'resolve me',
+    body: 'body text',
+    comments: [{ author: { login: 'alice' }, body: 'a comment' }],
+  }
+
+  it('resolveResolvePromptFile：项目存在 .sandcastle/resolve.md 时优先返回它', () => {
+    const projectResolve = join(dir, '.sandcastle', 'resolve.md')
+    mkdirSync(join(dir, '.sandcastle'), { recursive: true })
+    writeFileSync(projectResolve, '# 自定义 resolve 模板\n')
+    expect(resolveResolvePromptFile(dir)).toBe(projectResolve)
+  })
+
+  it('无自定义 resolve 模板时返回包内默认 prompts/resolve.md 且文件存在', () => {
+    expect(resolveResolvePromptFile(dir)).toBe(resolvePromptFilePath())
+    expect(resolvePromptFilePath()).toMatch(/prompts\/resolve\.md$/)
+    expect(existsSync(resolveResolvePromptFile(dir))).toBe(true)
+  })
+
+  it('ensureProjectResolvePrompt：首次调用把默认模板复制到项目 .sandcastle/resolve.md', () => {
+    const target = ensureProjectResolvePrompt(dir)
+    expect(target).toBe(join(dir, '.sandcastle', 'resolve.md'))
+    expect(existsSync(target)).toBe(true)
+    expect(readFileSync(target, 'utf8')).toBe(readFileSync(resolvePromptFilePath(), 'utf8'))
+  })
+
+  it('ensureProjectResolvePrompt：幂等，已存在时不覆盖用户修改', () => {
+    const target = ensureProjectResolvePrompt(dir)
+    writeFileSync(target, '# 用户自定义 resolve 版本\n')
+    expect(ensureProjectResolvePrompt(dir)).toBe(target)
+    expect(readFileSync(target, 'utf8')).toBe('# 用户自定义 resolve 版本\n')
+  })
+
+  it('buildResolvePromptArgs：包含冲突文件清单、被合并的 main 提交 SHA、issue 上下文与分支', () => {
+    const args = buildResolvePromptArgs({
+      issue,
+      branch: 'agent/issue-25',
+      conflictFiles: ['src/foo.ts', 'test/foo.test.ts'],
+      mergeSha: 'a1b2c3d4',
+    })
+    expect(args).toEqual({
+      ISSUE_NUMBER: '25',
+      ISSUE_TITLE: 'resolve me',
+      ISSUE_BODY: 'body text',
+      ISSUE_COMMENTS: '- **alice**: a comment',
+      CONFLICT_FILES: '- `src/foo.ts`\n- `test/foo.test.ts`',
+      CONFLICT_COUNT: '2',
+      MERGED_SHA: 'a1b2c3d4',
+      BRANCH: 'agent/issue-25',
+    })
+  })
+
+  it('resolve.md 模板：包含冲突信息占位符与四条边界约束（一次机会/验收门槛/禁止新功能/必须提交）', () => {
+    const template = readFileSync(resolvePromptFilePath(), 'utf8')
+    expect(template).toContain('{{MERGED_SHA}}')
+    expect(template).toContain('{{CONFLICT_FILES}}')
+    expect(template).toContain('{{CONFLICT_COUNT}}')
+    expect(template).toContain('{{ISSUE_NUMBER}}')
+    expect(template).toMatch(/一次机会/)
+    expect(template).toMatch(/同一验收门槛/)
+    expect(template).toMatch(/只解决冲突/)
+    expect(template).toMatch(/禁止新功能|无关重构/)
+    expect(template).toMatch(/必须产生提交|零提交按失败/)
   })
 })
 

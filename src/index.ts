@@ -19,6 +19,7 @@ export {
   pushBranch,
   createPullRequest,
   publishAndMerge,
+  publishConflictFallback,
   buildPresyncConflictComment,
   recentRalphCommits,
   listPullRequestsForBranch,
@@ -42,7 +43,8 @@ export type {
 export { runIssueInSandbox, outcomeSchema } from './sandbox.js'
 export type { Outcome, RunIssueOptions, RunIssueResult } from './sandbox.js'
 
-// 提示词（sandcastle 官方模板协议：项目 .sandcastle/prompt.md > 包内默认）
+// 提示词（sandcastle 官方模板协议：项目 .sandcastle/prompt.md > 包内默认；
+// resolve 模板：项目 .sandcastle/resolve.md > 包内默认）
 export {
   promptFilePath,
   projectPromptPath,
@@ -50,6 +52,11 @@ export {
   ensureProjectPrompt,
   ensureSandcastleGitignore,
   buildIssuePromptArgs,
+  resolvePromptFilePath,
+  projectResolvePromptPath,
+  resolveResolvePromptFile,
+  ensureProjectResolvePrompt,
+  buildResolvePromptArgs,
 } from './prompts.js'
 
 // 日志
