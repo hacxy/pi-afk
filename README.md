@@ -86,7 +86,7 @@
      本轮跳过
    · autoMerge 开启时 → 自动 squash 合并 PR
      （合并失败等 30 秒重试一次，仍失败报错保留 gh 输出）
-12. 写事件日志（~/.afk/logs/afk.jsonl）
+12. 写事件日志（项目 .sandcastle/logs/afk.jsonl）
 13. 进入下一个 issue（处理过的 issue 无论结果都进跳过集合，
     同一 run 内不再重复 pick——防关闭状态传播延迟导致重复处理）
 ```
@@ -215,7 +215,7 @@ cd 你的项目 && afk doctor
 
 > 旧配置的 `label`（字符串或数组）字段会被自动迁移为 `labels` 数组，无需手动改。
 
-> 其余行为项硬编码为代码常量：日志目录固定 `~/.afk/logs`，完成信号固定 `<promise>COMPLETE</promise>`。旧配置中的其他字段（如 `logDir`/`completionSignal`/`promptFile`）会被忽略且不报错。
+> 其余行为项硬编码为代码常量：完成信号固定 `<promise>COMPLETE</promise>`；日志位置固定为**目标项目目录下的 `.sandcastle/logs/`**（不再写入全局 `~/.afk/logs/`，旧文件保留原地不迁移不双写）。旧配置中的其他字段（如 `logDir`/`completionSignal`/`promptFile`）会被忽略且不报错。
 
 ---
 
@@ -304,8 +304,10 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 
 ## 日志与事件
 
-- **每次 issue 的沙箱日志**：`~/.afk/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）
-- **事件流**：`~/.afk/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
+日志写入**目标项目目录下的 `.sandcastle/logs/`**（issue #33，不再写入全局 `~/.afk/logs/`；旧文件保留原地不迁移、不双写）。`afk doctor` 会显示当前生效的日志路径。
+
+- **每次 issue 的沙箱日志**：`.sandcastle/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）；预同步冲突派发的 resolve run 为 `.sandcastle/logs/issue-<N>-resolve.log`
+- **事件流**：`.sandcastle/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
 
 日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result`（含收敛补合并 `merged-existing-pr`）/ `presync-conflict` / `presync-fetch-failed` / `resolve-success` / `resolve-failed` / `verify-failed` / `convergence-skip`（含 `reason: merged|open-clean|dirty`）/ `convergence-check-failed` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
 
@@ -334,7 +336,7 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 | ------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------- |
 | `Authentication Fails ... api key invalid`              | DEEPSEEK_API_KEY 未设置或无效 | `echo $DEEPSEEK_API_KEY` 确认；从平台重新生成                                                  |
 | `完成：没有可处理的开放 issue`                          | 没有符合条件的开放 issue      | `gh issue list` 查看；配置了 labels 时检查标签名与配置一致，未配置时检查是否确实没有开放 issue |
-| `Structured output tag <outcome> contains invalid JSON` | agent 输出不符合协议          | 查看 `~/.afk/logs/issue-N.log` 尾部；通常是模型/网络问题，重试                                 |
+| `Structured output tag <outcome> contains invalid JSON` | agent 输出不符合协议          | 查看 `.sandcastle/logs/issue-N.log` 尾部；通常是模型/网络问题，重试                            |
 | 镜像构建失败                                            | Docker/OrbStack 未运行        | 启动 OrbStack 后重试 `afk init`                                                                |
 | git push rejected (non-fast-forward)                    | issue 已处理过（旧分支残留）  | 合并/关闭旧 PR 和 issue；删除本地 `agent/issue-N` 分支                                         |
 | 沙箱内测试失败（平台二进制）                            | 宿主 node_modules 跨平台      | pnpm 项目已自动解决；npm/yarn 项目靠增量 install 修复                                          |

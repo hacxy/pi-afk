@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
-import { LOG_DIR } from './config.js'
+import { projectLogDir } from './config.js'
 import { appendLog } from './log.js'
 
 const execFileAsync = promisify(execFile)
@@ -382,7 +382,8 @@ async function presyncWithMain(opts: {
     await git(['fetch', 'origin', 'main'], projectDir)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    appendLog(LOG_DIR, { type: 'presync-fetch-failed', branch, message })
+    // issue #33：日志写入项目 .sandcastle/logs/
+    appendLog(projectLogDir(projectDir), { type: 'presync-fetch-failed', branch, message })
   }
 
   // 沙箱 worktree 路径（与 sandcastle branch 策略同名命名：斜杠→连字符），resolve run 据此复用

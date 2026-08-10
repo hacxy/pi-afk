@@ -1,14 +1,13 @@
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import {
   loadGlobalConfig,
   DEFAULT_GLOBAL_CONFIG,
-  LOG_DIR,
+  projectLogDir,
   COMPLETION_SIGNAL,
-  ensureGlobalDirs,
 } from '../src/config.js'
 
 let dir: string
@@ -148,20 +147,19 @@ describe('loadGlobalConfig', () => {
   })
 })
 
-describe('固定常量', () => {
-  it('LOG_DIR 固定为展开后的 ~/.afk/logs', () => {
-    expect(LOG_DIR).toBe(join(homedir(), '.afk', 'logs'))
-    expect(LOG_DIR).not.toContain('~')
+describe('projectLogDir', () => {
+  it('返回项目 .sandcastle/logs 目录（不再使用全局 ~/.afk/logs）', () => {
+    expect(projectLogDir('/proj')).toBe(join('/proj', '.sandcastle', 'logs'))
+    expect(projectLogDir('/proj')).not.toContain('.afk')
   })
 
-  it('COMPLETION_SIGNAL 固定为 <promise>COMPLETE</promise>', () => {
-    expect(COMPLETION_SIGNAL).toBe('<promise>COMPLETE</promise>')
+  it('相对项目目录按原样拼接', () => {
+    expect(projectLogDir('rel/proj')).toBe(join('rel/proj', '.sandcastle', 'logs'))
   })
 })
 
-describe('ensureGlobalDirs', () => {
-  it('返回固定日志目录并确保其存在', () => {
-    expect(ensureGlobalDirs()).toBe(LOG_DIR)
-    expect(existsSync(LOG_DIR)).toBe(true)
+describe('固定常量', () => {
+  it('COMPLETION_SIGNAL 固定为 <promise>COMPLETE</promise>', () => {
+    expect(COMPLETION_SIGNAL).toBe('<promise>COMPLETE</promise>')
   })
 })

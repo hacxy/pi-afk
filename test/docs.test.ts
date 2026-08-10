@@ -22,6 +22,13 @@ describe('README 文档-实现一致', () => {
     expect(README).not.toMatch(/\.afkrc\.json/)
     expect(README).not.toMatch(/maxIterations/)
   })
+
+  it('不再把全局 ~/.afk/logs 描述为当前日志位置（issue #33：日志已迁移到项目 .sandcastle/logs/）', () => {
+    // 允许「不再写入全局 ~/.afk/logs」这类否定说明，但不得把旧路径描述为当前生效位置
+    expect(README).not.toMatch(/~\/\.afk\/logs\/issue-/)
+    expect(README).not.toMatch(/~\/\.afk\/logs\/afk\.jsonl/)
+    expect(README).not.toMatch(/日志目录固定 `~\/\.afk\/logs`/)
+  })
 })
 
 describe('CLI usage 文档-实现一致', () => {
