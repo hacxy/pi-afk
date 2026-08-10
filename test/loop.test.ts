@@ -8,8 +8,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 import { DEFAULT_GLOBAL_CONFIG, type GlobalConfig } from '../src/config.js'
 import { isHitlIssue } from '../src/issues.js'
-import { pickIssue, processIssue, runAfkLoop, type LoopOptions } from '../src/loop.js'
-import { runIssueInSandbox } from '../src/sandbox.js'
+import {
+  formatAgentStreamEvent,
+  pickIssue,
+  processIssue,
+  runAfkLoop,
+  type LoopEvent,
+  type LoopOptions,
+} from '../src/loop.js'
+import { runIssueInSandbox, type AgentStreamEvent } from '../src/sandbox.js'
 
 /**
  * processIssue / runAfkLoop（issue #22 验证门接线）：
@@ -73,12 +80,20 @@ const happyPath: (file: string, args: string[]) => ScriptResult = (file, args) =
 
 const issue22: Issue = { number: 22, title: 'issue 22', body: 'body', comments: [] }
 
-function makeOpts(overrides: Partial<GlobalConfig> = {}, iterations = 2): LoopOptions {
+function makeOpts(
+  overrides: Partial<GlobalConfig> = {},
+  iterations = 2,
+  stream: {
+    onEvent?: (e: LoopEvent) => void
+    onAgentStreamEvent?: (e: AgentStreamEvent) => void
+  } = {},
+): LoopOptions {
   return {
     projectDir: dir,
     iterations,
     config: { ...DEFAULT_GLOBAL_CONFIG, ...overrides },
     deepseekKey: 'test-key',
+    ...stream,
   }
 }
 
@@ -325,6 +340,34 @@ describe('runAfkLoop 预同步冲突 → resolve run（issue #25）', () => {
     expect(events.some((e) => e.type === 'error')).toBe(false)
     expect(events.some((e) => e.type === 'no-more-tasks')).toBe(true)
   })
+
+  it('resolve run 同样透传 onAgentStreamEvent（预同步冲突路径）', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
+        return { stdout: JSON.stringify([issue22]) }
+      }
+      return conflictScript(file, args)
+    })
+    vi.mocked(runIssueInSandbox)
+      .mockResolvedValueOnce({
+        outcome: { status: 'done', summary: 'all done' },
+        commits: [{ sha: 'a1b2c3' }],
+        stdout: '',
+      })
+      .mockResolvedValueOnce({
+        outcome: { status: 'done', summary: 'conflicts resolved' },
+        commits: [{ sha: 'r1r2r3' }],
+        stdout: '',
+      })
+
+    const sink = vi.fn()
+    await runAfkLoop(makeOpts({}, 2, { onAgentStreamEvent: sink }))
+
+    const calls = vi.mocked(runIssueInSandbox).mock.calls
+    expect(calls).toHaveLength(2)
+    expect(calls[0][0].onAgentStreamEvent).toBe(sink)
+    expect(calls[1][0].onAgentStreamEvent).toBe(sink)
+  })
 })
 
 describe('runAfkLoop 验证失败本轮停止（issue #22）', () => {
@@ -477,6 +520,69 @@ describe('runAfkLoop 循环内去重（issue #24）', () => {
     expect(events.filter((e) => e.type === 'pr-exists-merged')).toHaveLength(1)
     expect(events.filter((e) => e.type === 'issue-picked')).toHaveLength(1)
     expect(events.some((e) => e.type === 'no-more-tasks')).toBe(true)
+  })
+})
+
+describe('runAfkLoop 事件实时回调（issue #34）', () => {
+  it('onEvent 在事件发生时立即回调，与返回的事件数组一一对应（不重复不遗漏）', async () => {
+    const sink = vi.fn()
+    const events = await runAfkLoop(makeOpts({}, 2, { onEvent: sink }))
+
+    expect(sink).toHaveBeenCalledTimes(events.length)
+    events.forEach((e, i) => expect(sink.mock.calls[i][0]).toBe(e))
+  })
+
+  it('processIssue 内部事件（issue-outcome / pull-request / issue-merged）同样实时回调', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'pr' && args[1] === 'merge') return { stdout: 'merged' }
+      return happyPath(file, args)
+    })
+    const sink = vi.fn()
+    const events = await processIssue(issue22, makeOpts({ autoMerge: true }, 2, { onEvent: sink }))
+
+    expect(sink).toHaveBeenCalledTimes(events.length)
+    expect(events.some((e) => e.type === 'issue-outcome')).toBe(true)
+    expect(events.some((e) => e.type === 'pull-request')).toBe(true)
+    expect(events.some((e) => e.type === 'issue-merged')).toBe(true)
+  })
+
+  it('onAgentStreamEvent 透传给沙箱 run（agent 输出实时流式显示到终端）', async () => {
+    const sink = vi.fn()
+    await processIssue(issue22, makeOpts({}, 2, { onAgentStreamEvent: sink }))
+
+    expect(vi.mocked(runIssueInSandbox).mock.calls[0][0].onAgentStreamEvent).toBe(sink)
+  })
+})
+
+describe('formatAgentStreamEvent（issue #34 agent 输出流式格式）', () => {
+  const ts = new Date(0)
+  it('text：原样透传（不追加换行，保持流式连贯）', () => {
+    expect(
+      formatAgentStreamEvent({ type: 'text', message: '正在实现', iteration: 1, timestamp: ts }),
+    ).toBe('正在实现')
+  })
+
+  it('toolCall：工具调用折叠为一行（多行参数压成单行）', () => {
+    expect(
+      formatAgentStreamEvent({
+        type: 'toolCall',
+        name: 'Bash',
+        formattedArgs: 'npm run\ntypecheck &&\n  pnpm test',
+        iteration: 1,
+        timestamp: ts,
+      }),
+    ).toBe('⚙ Bash: npm run typecheck && pnpm test\n')
+  })
+
+  it('raw：原始行原样输出（行尾补换行）', () => {
+    expect(
+      formatAgentStreamEvent({
+        type: 'raw',
+        line: '{"type":"message_update"}',
+        iteration: 1,
+        timestamp: ts,
+      }),
+    ).toBe('{"type":"message_update"}\n')
   })
 })
 

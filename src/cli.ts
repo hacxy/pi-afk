@@ -15,13 +15,13 @@ import {
 import { requireDeepseekKey } from './credentials.js'
 import { collectDoctorFacts, doctorReport, startupTemplateLine } from './doctor.js'
 import { appendLog } from './log.js'
-import { runAfkLoop, type LoopEvent } from './loop.js'
+import { runAfkLoop, formatAgentStreamEvent, type LoopEvent } from './loop.js'
 import {
   ensureProjectPrompt,
   ensureSandcastleGitignore,
   ensureProjectResolvePrompt,
 } from './prompts.js'
-import { dockerBuildArgs, hostPnpmVersion } from './sandbox.js'
+import { dockerBuildArgs, hostPnpmVersion, type AgentStreamEvent } from './sandbox.js'
 
 const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
 
@@ -167,69 +167,72 @@ async function initCmd(projectDir: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 事件打印
+// 事件实时打印（issue #34：事件发生时立即打印，run 结束仅剩摘要，无重复输出）
 // ---------------------------------------------------------------------------
 
-function printEvents(events: LoopEvent[]): void {
-  for (const e of events) {
-    switch (e.type) {
-      case 'iteration-start':
-        console.log(`\n[${e.iteration}/${e.total}] ----------`)
-        break
-      case 'issue-picked':
-        console.log(`→ 处理 issue #${e.issue.number}: ${e.issue.title}`)
-        break
-      case 'issue-outcome':
-        console.log(
-          `  结果: ${e.status}（commit ${e.commitCount}）${e.summary ? '- ' + e.summary : ''}`,
-        )
-        break
-      case 'pull-request':
-        console.log(`  ✓ PR 已创建 (#${e.prNumber}): ${e.url}`)
-        break
-      case 'issue-commented':
-        console.log(`  留言: ${e.reason}`)
-        break
-      case 'issue-merged':
-        console.log(`  ✓ PR #${e.prNumber} 已合并，issue #${e.issue.number} 随之关闭`)
-        break
-      case 'pr-exists-merged':
-        console.log(`  ⏭ 已有已合并 PR #${e.prNumber}（issue #${e.issue.number}），本轮跳过`)
-        break
-      case 'pr-pending-manual-merge':
-        console.log(
-          `  ⏭ 已有 PR #${e.prNumber} 待人工合并（issue #${e.issue.number}），本轮跳过，不自动合并`,
-        )
-        break
-      case 'pr-conflict-skip':
-        console.warn(
-          `  ⏭ 已有 PR #${e.prNumber} 存在冲突（issue #${e.issue.number}），已留言，待人工解决`,
-        )
-        break
-      case 'presync-conflict':
-        console.warn(
-          `  ⚠ 预同步冲突（issue #${e.issue.number}）: ${e.files.length} 个冲突文件，派发 resolve run 自动解冲突`,
-        )
-        break
-      case 'resolve-failed':
-        console.warn(
-          `  ✗ 自动解冲突失败（issue #${e.issue.number}）: ${e.reason}——已回退兜底（push + PR + 冲突留言）`,
-        )
-        break
-      case 'verify-failed':
-        console.error(`  ✗ 验证未通过，未发布（issue #${e.issue.number}）: ${e.reason}`)
-        break
-      case 'no-more-tasks':
-        console.log('完成：没有可处理的开放 issue。')
-        break
-      case 'max-iterations-reached':
-        console.log(`达到迭代上限 ${e.iteration}，仍有任务未完成。`)
-        break
-      case 'error':
-        console.error(`✗ 错误: ${e.message}${e.issue ? `（issue #${e.issue.number}）` : ''}`)
-        break
-    }
+function printEvent(e: LoopEvent): void {
+  switch (e.type) {
+    case 'iteration-start':
+      console.log(`\n[${e.iteration}/${e.total}] ----------`)
+      break
+    case 'issue-picked':
+      console.log(`→ 处理 issue #${e.issue.number}: ${e.issue.title}`)
+      break
+    case 'issue-outcome':
+      console.log(
+        `  结果: ${e.status}（commit ${e.commitCount}）${e.summary ? '- ' + e.summary : ''}`,
+      )
+      break
+    case 'pull-request':
+      console.log(`  ✓ PR 已创建 (#${e.prNumber}): ${e.url}`)
+      break
+    case 'issue-commented':
+      console.log(`  留言: ${e.reason}`)
+      break
+    case 'issue-merged':
+      console.log(`  ✓ PR #${e.prNumber} 已合并，issue #${e.issue.number} 随之关闭`)
+      break
+    case 'pr-exists-merged':
+      console.log(`  ⏭ 已有已合并 PR #${e.prNumber}（issue #${e.issue.number}），本轮跳过`)
+      break
+    case 'pr-pending-manual-merge':
+      console.log(
+        `  ⏭ 已有 PR #${e.prNumber} 待人工合并（issue #${e.issue.number}），本轮跳过，不自动合并`,
+      )
+      break
+    case 'pr-conflict-skip':
+      console.warn(
+        `  ⏭ 已有 PR #${e.prNumber} 存在冲突（issue #${e.issue.number}），已留言，待人工解决`,
+      )
+      break
+    case 'presync-conflict':
+      console.warn(
+        `  ⚠ 预同步冲突（issue #${e.issue.number}）: ${e.files.length} 个冲突文件，派发 resolve run 自动解冲突`,
+      )
+      break
+    case 'resolve-failed':
+      console.warn(
+        `  ✗ 自动解冲突失败（issue #${e.issue.number}）: ${e.reason}——已回退兜底（push + PR + 冲突留言）`,
+      )
+      break
+    case 'verify-failed':
+      console.error(`  ✗ 验证未通过，未发布（issue #${e.issue.number}）: ${e.reason}`)
+      break
+    case 'no-more-tasks':
+      console.log('完成：没有可处理的开放 issue。')
+      break
+    case 'max-iterations-reached':
+      console.log(`达到迭代上限 ${e.iteration}，仍有任务未完成。`)
+      break
+    case 'error':
+      console.error(`✗ 错误: ${e.message}${e.issue ? `（issue #${e.issue.number}）` : ''}`)
+      break
   }
+}
+
+/** agent 流式输出（issue #34）：文本透传 / 工具调用折叠一行 / 原始行原样，写入 stdout */
+function printAgentStream(event: AgentStreamEvent): void {
+  process.stdout.write(formatAgentStreamEvent(event))
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +241,15 @@ function printEvents(events: LoopEvent[]): void {
 
 async function main(): Promise<void> {
   const projectDir = process.cwd()
+
+  // 非交互终端（管道 / 输出重定向）下行为正常：对端提前关闭（如 afk 10 | head）时
+  // 不因 EPIPE 崩溃，静默退出即可（流式输出是尽力而为）
+  process.stdout.on('error', (err) => {
+    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'EPIPE') {
+      process.exit(0)
+    }
+  })
+
   const argv = process.argv.slice(2)
   const { values } = parseArgs({
     args: argv,
@@ -292,9 +304,11 @@ async function main(): Promise<void> {
     iterations,
     config: cfg,
     deepseekKey,
+    // issue #34：事件与 agent 流式输出实时打印，不等 run 结束汇总
+    onEvent: printEvent,
+    onAgentStreamEvent: printAgentStream,
   })
 
-  printEvents(events)
   appendLog(projectLogDir(projectDir), { type: 'run-end', events: events.length })
 
   const errors = events.filter((e) => e.type === 'error')

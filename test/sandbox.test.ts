@@ -1,9 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 
-import { hostPnpmVersion, dockerBuildArgs, buildBranchStrategy } from '../src/sandbox.js'
+import {
+  hostPnpmVersion,
+  dockerBuildArgs,
+  buildBranchStrategy,
+  buildSandboxLogging,
+} from '../src/sandbox.js'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -33,6 +38,23 @@ describe('dockerBuildArgs', () => {
     expect(args).toContain('-f')
     expect(args).toContain('/tmp/Dockerfile')
     expect(args).toContain('/tmp') // 构建上下文目录
+  })
+})
+
+describe('buildSandboxLogging（issue #34 终端实时输出）', () => {
+  it('带 onAgentStreamEvent 时透传实时回调（流式到终端），日志文件路径不变（#33 完整落盘）', () => {
+    const sink = vi.fn()
+    const logging = buildSandboxLogging('/proj/.sandcastle/logs/issue-1.log', sink)
+    expect(logging.type).toBe('file')
+    expect(logging.path).toBe('/proj/.sandcastle/logs/issue-1.log')
+    expect(logging.onAgentStreamEvent).toBe(sink)
+  })
+
+  it('缺省回调时只写日志文件（行为与 issue #33 一致，不引入多余字段）', () => {
+    expect(buildSandboxLogging('/proj/.sandcastle/logs/issue-1.log')).toEqual({
+      type: 'file',
+      path: '/proj/.sandcastle/logs/issue-1.log',
+    })
   })
 })
 

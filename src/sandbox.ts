@@ -1,4 +1,4 @@
-import { run, pi, Output } from '@ai-hero/sandcastle'
+import { run, pi, Output, type AgentStreamEvent } from '@ai-hero/sandcastle'
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -20,6 +20,9 @@ export const outcomeSchema = z.object({
 
 export type Outcome = z.infer<typeof outcomeSchema>
 
+/** 透传给调用方（loop/CLI），供终端实时显示 */
+export type { AgentStreamEvent }
+
 export interface RunIssueOptions {
   /** 沙箱镜像名 */
   image: string
@@ -39,6 +42,9 @@ export interface RunIssueOptions {
   promptArgs: Record<string, string>
   /** 运行日志路径（项目 .sandcastle/logs/ 下，issue #33） */
   logPath: string
+  /** 实时流式回调：agent 输出（文本/工具调用/原始行）发生时立即转发（终端透传，issue #34）；
+   *  缺省 = 不转发，事件仍由 sandcastle 完整写入 logPath 日志文件 */
+  onAgentStreamEvent?: (event: AgentStreamEvent) => void
   /** 无输出超时（秒） */
   idleTimeoutSeconds?: number
 }
@@ -133,6 +139,20 @@ function detectPackageManager(projectDir: string): 'pnpm' | 'npm' | 'yarn' | 'no
   return 'none'
 }
 
+/**
+ * 构建 sandcastle logging 配置（issue #34）：
+ * 文件日志（#33，.sandcastle/logs/issue-<N>.log 完整落盘）+ 可选的实时流式回调（终端透传）。
+ * 抽出为纯函数，便于单测接线。
+ */
+export function buildSandboxLogging(
+  logPath: string,
+  onAgentStreamEvent?: (event: AgentStreamEvent) => void,
+): { type: 'file'; path: string; onAgentStreamEvent?: (event: AgentStreamEvent) => void } {
+  return onAgentStreamEvent
+    ? { type: 'file', path: logPath, onAgentStreamEvent }
+    : { type: 'file', path: logPath }
+}
+
 export async function runIssueInSandbox(opts: RunIssueOptions): Promise<RunIssueResult> {
   const env: Record<string, string> = { DEEPSEEK_API_KEY: opts.deepseekKey }
   const mounts: { hostPath: string; sandboxPath: string }[] = []
@@ -181,7 +201,7 @@ export async function runIssueInSandbox(opts: RunIssueOptions): Promise<RunIssue
     completionSignal: COMPLETION_SIGNAL,
     output: Output.object({ tag: 'outcome', schema: outcomeSchema }),
     maxIterations: 1,
-    logging: { type: 'file', path: opts.logPath },
+    logging: buildSandboxLogging(opts.logPath, opts.onAgentStreamEvent),
     idleTimeoutSeconds: opts.idleTimeoutSeconds ?? 600,
   })
 
