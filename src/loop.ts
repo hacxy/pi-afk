@@ -11,7 +11,7 @@ import {
   type Issue,
 } from './issues.js'
 import { appendLog } from './log.js'
-import { promptFilePath, buildIssuePromptArgs } from './prompts.js'
+import { resolvePromptFile, buildIssuePromptArgs } from './prompts.js'
 import { runIssueInSandbox, type Outcome } from './sandbox.js'
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
       deepseekKey: opts.deepseekKey,
       projectDir: opts.projectDir,
       branch,
-      promptFile: promptFilePath(),
+      promptFile: resolvePromptFile({ configPromptFile: opts.config.promptFile }),
       promptArgs,
       logPath: join(logDir, `issue-${issue.number}.log`),
       completionSignal: opts.config.completionSignal,

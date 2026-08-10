@@ -8,6 +8,9 @@ RUN apt-get update \
 # pi coding agent（与宿主 pi 版本保持一致）
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
+# pnpm（与宿主版本一致，用于沙箱内增量安装/修复平台二进制）
+RUN npm install -g --ignore-scripts pnpm@11.21.0
+
 # UID/GID 对齐宿主（sandcastle 预检要求，避免运行时权限问题）
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000

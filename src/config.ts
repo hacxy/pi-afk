@@ -16,6 +16,8 @@ export interface GlobalConfig {
   logDir: string
   /** 完成信号（agent 输出后结束迭代） */
   completionSignal: string
+  /** 自定义提示词模板路径（默认用包内 prompts/ralph.md） */
+  promptFile?: string
 }
 
 export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
