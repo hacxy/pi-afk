@@ -2,7 +2,7 @@ import type { Issue } from './issues.js'
 
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, dirname, resolve } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /**
@@ -21,19 +21,14 @@ export function promptFilePath(name = 'ralph.md'): string {
 }
 
 /**
- * 解析生效的模板路径（优先级：全局 ~/.afk/prompts/ > 配置 promptFile > 包内默认）
+ * 解析生效的模板路径（优先级：全局 ~/.afk/prompts/ > 包内默认）
  */
-export function resolvePromptFile(opts: { configPromptFile?: string; name?: string }): string {
+export function resolvePromptFile(opts: { name?: string } = {}): string {
   const name = opts.name ?? 'ralph.md'
   // 1. 全局覆盖：~/.afk/prompts/
   const globalPath = join(homedir(), '.afk', 'prompts', name)
   if (existsSync(globalPath)) return globalPath
-  // 2. 配置指定（绝对或相对路径）
-  if (opts.configPromptFile) {
-    if (isAbsolute(opts.configPromptFile)) return opts.configPromptFile
-    return resolve(process.cwd(), opts.configPromptFile)
-  }
-  // 3. 包内默认
+  // 2. 包内默认
   return promptFilePath(name)
 }
 

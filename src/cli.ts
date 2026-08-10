@@ -7,10 +7,10 @@ import { parseArgs } from 'node:util'
 
 import {
   loadGlobalConfig,
-  loadProjectConfig,
   globalConfigPath,
   DEFAULT_GLOBAL_CONFIG,
   ensureGlobalDirs,
+  LOG_DIR,
   type GlobalConfig,
 } from './config.js'
 import { requireDeepseekKey } from './credentials.js'
@@ -29,8 +29,7 @@ const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
   GH_TOKEN              GitHub token（可选，未设置时用宿主 gh 登录凭据）
 
 配置:
-  全局: ~/.afk/config.json
-  项目: ./.afkrc.json（可选，可覆盖 label）
+  全局: ~/.afk/config.json（image / model / label / autoMerge）
 `
 
 // ---------------------------------------------------------------------------
@@ -222,7 +221,6 @@ async function main(): Promise<void> {
   }
 
   const cfg = loadGlobalConfig()
-  const projectCfg = loadProjectConfig(projectDir)
 
   // 运行时前置检查（自动初始化：配置/镜像/gitignore，无需手动 afk init）
   if (!ensureRuntime(cfg, projectDir)) {
@@ -232,18 +230,17 @@ async function main(): Promise<void> {
 
   const deepseekKey = requireDeepseekKey()
 
-  const config = { ...cfg, label: projectCfg.label ?? cfg.label }
-  appendLog(cfg.logDir, { type: 'run-start', projectDir, iterations })
+  appendLog(LOG_DIR, { type: 'run-start', projectDir, iterations })
 
   const events = await runAfkLoop({
     projectDir,
     iterations,
-    config,
+    config: cfg,
     deepseekKey,
   })
 
   printEvents(events)
-  appendLog(cfg.logDir, { type: 'run-end', events: events.length })
+  appendLog(LOG_DIR, { type: 'run-end', events: events.length })
 
   const errors = events.filter((e) => e.type === 'error')
   const done = events.filter((e) => e.type === 'issue-outcome' && e.status === 'done')

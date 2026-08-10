@@ -1,7 +1,6 @@
-import type { GlobalConfig } from './config.js'
-
 import { join } from 'node:path'
 
+import { LOG_DIR, type GlobalConfig } from './config.js'
 import {
   listAfkIssues,
   commentOnIssue,
@@ -71,7 +70,6 @@ export function countHitlPending(issues: Issue[]): number {
 async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[]> {
   const events: LoopEvent[] = []
   const branch = `agent/issue-${issue.number}`
-  const logDir = opts.config.logDir
 
   try {
     const recentCommits = await recentRalphCommits(opts.projectDir)
@@ -83,10 +81,9 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
       deepseekKey: opts.deepseekKey,
       projectDir: opts.projectDir,
       branch,
-      promptFile: resolvePromptFile({ configPromptFile: opts.config.promptFile }),
+      promptFile: resolvePromptFile(),
       promptArgs,
-      logPath: join(logDir, `issue-${issue.number}.log`),
-      completionSignal: opts.config.completionSignal,
+      logPath: join(LOG_DIR, `issue-${issue.number}.log`),
     })
 
     const { outcome } = result
@@ -141,7 +138,7 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
       }
     }
 
-    appendLog(logDir, {
+    appendLog(LOG_DIR, {
       type: 'issue-result',
       issueNumber: issue.number,
       status: outcome.status,
@@ -152,7 +149,7 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
     return events
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    appendLog(logDir, { type: 'error', issueNumber: issue.number, message })
+    appendLog(LOG_DIR, { type: 'error', issueNumber: issue.number, message })
     return [{ type: 'error', message, issue }]
   }
 }
@@ -168,7 +165,7 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
 
   for (let i = 1; i <= opts.iterations; i++) {
     events.push({ type: 'iteration-start', iteration: i, total: opts.iterations })
-    appendLog(opts.config.logDir, { type: 'iteration-start', iteration: i })
+    appendLog(LOG_DIR, { type: 'iteration-start', iteration: i })
 
     let issues: Issue[]
     try {
@@ -184,12 +181,12 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
       // 没有可自动处理的 issue 时，告知待人工的 HITL 切片数
       const hitlPending = countHitlPending(issues)
       events.push({ type: 'no-more-tasks', hitlPending })
-      appendLog(opts.config.logDir, { type: 'no-more-tasks', hitlPending })
+      appendLog(LOG_DIR, { type: 'no-more-tasks', hitlPending })
       break
     }
 
     events.push({ type: 'issue-picked', issue })
-    appendLog(opts.config.logDir, {
+    appendLog(LOG_DIR, {
       type: 'issue-picked',
       issueNumber: issue.number,
       title: issue.title,
