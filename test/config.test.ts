@@ -20,12 +20,35 @@ afterEach(() => {
 })
 
 describe('loadGlobalConfig', () => {
-  it('无配置文件时返回 4 个默认值（labels 默认空 = 不过滤）', () => {
+  it('无配置文件时返回默认值（labels 默认空 = 不过滤，verifyCommand 默认缺省）', () => {
     const cfg = loadGlobalConfig(join(dir, 'none.json'))
     expect(cfg.image).toBe(DEFAULT_GLOBAL_CONFIG.image)
     expect(cfg.model).toBe(DEFAULT_GLOBAL_CONFIG.model)
     expect(cfg.labels).toEqual([])
     expect(cfg.autoMerge).toBeUndefined()
+    expect(cfg.verifyCommand).toBeUndefined()
+  })
+
+  it('verifyCommand：缺失/空串 → undefined（跳过验证，行为不变）', () => {
+    // 未配置字段：undefined
+    writeFileSync(join(dir, 'no-verify.json'), JSON.stringify({}))
+    expect(loadGlobalConfig(join(dir, 'no-verify.json')).verifyCommand).toBeUndefined()
+    // 空串：undefined
+    writeFileSync(join(dir, 'empty-verify.json'), JSON.stringify({ verifyCommand: '' }))
+    expect(loadGlobalConfig(join(dir, 'empty-verify.json')).verifyCommand).toBeUndefined()
+    // 纯空白：undefined
+    writeFileSync(join(dir, 'blank-verify.json'), JSON.stringify({ verifyCommand: '   ' }))
+    expect(loadGlobalConfig(join(dir, 'blank-verify.json')).verifyCommand).toBeUndefined()
+  })
+
+  it('verifyCommand：读取配置的验证命令字符串', () => {
+    writeFileSync(
+      join(dir, 'verify.json'),
+      JSON.stringify({ verifyCommand: 'pnpm typecheck && pnpm test:run' }),
+    )
+    expect(loadGlobalConfig(join(dir, 'verify.json')).verifyCommand).toBe(
+      'pnpm typecheck && pnpm test:run',
+    )
   })
 
   it('读取配置文件中的 labels 数组', () => {
@@ -87,6 +110,17 @@ describe('loadGlobalConfig', () => {
       }),
     )
     expect(loadGlobalConfig(join(dir, 'dirty2.json')).labels).toEqual(['afk'])
+  })
+
+  it('verifyCommand 与其他字段并存时互不影响', () => {
+    writeFileSync(
+      join(dir, 'mix.json'),
+      JSON.stringify({ image: 'custom:latest', verifyCommand: 'make test' }),
+    )
+    const cfg = loadGlobalConfig(join(dir, 'mix.json'))
+    expect(cfg.image).toBe('custom:latest')
+    expect(cfg.verifyCommand).toBe('make test')
+    expect(cfg.model).toBe(DEFAULT_GLOBAL_CONFIG.model)
   })
 
   it('旧格式字段（logDir/completionSignal/promptFile）被忽略且不报错', () => {

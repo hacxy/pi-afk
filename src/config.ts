@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 /**
  * 全局配置（~/.afk/config.json）——全局唯一配置源（无项目级配置层）。
- * 只保留用户真正会改的 4 个字段，其余行为项（logDir / completionSignal）硬编码为代码常量。
+ * 只保留用户真正会改的 5 个字段，其余行为项（logDir / completionSignal）硬编码为代码常量。
  */
 export interface GlobalConfig {
   /** 沙箱镜像名 */
@@ -15,6 +15,8 @@ export interface GlobalConfig {
   labels: string[]
   /** 完成后自动合并 PR（默认关闭，保守；AFK 切片语义下可开启） */
   autoMerge?: boolean
+  /** 可选验证门：发布（T8）push 前在分支临时 worktree 执行该命令，非零退出不发版（默认缺省 = 跳过验证） */
+  verifyCommand?: string
 }
 
 export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
@@ -48,13 +50,20 @@ function normalizeLabels(raw: unknown): string[] {
   return []
 }
 
+/** 归一化 verifyCommand：仅字符串且非空白才生效（trim 后），其余 → undefined（跳过验证） */
+function normalizeVerifyCommand(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
 export function loadGlobalConfig(filePath = globalConfigPath()): GlobalConfig {
   if (existsSync(filePath)) {
     try {
       const raw = JSON.parse(readFileSync(filePath, 'utf8')) as Partial<GlobalConfig> & {
         label?: string | string[]
       }
-      // 只读 4 个字段；旧配置中的其他字段（logDir/completionSignal/promptFile 等）被忽略且不报错。
+      // 只读 5 个字段；旧配置中的其他字段（logDir/completionSignal/promptFile 等）被忽略且不报错。
       // labels 优先；旧字段 label（字符串/数组）自动迁移为 labels 数组
       const labels = normalizeLabels(raw.labels ?? raw.label)
       return {
@@ -62,6 +71,7 @@ export function loadGlobalConfig(filePath = globalConfigPath()): GlobalConfig {
         model: raw.model ?? DEFAULT_GLOBAL_CONFIG.model,
         labels,
         autoMerge: raw.autoMerge ?? DEFAULT_GLOBAL_CONFIG.autoMerge,
+        verifyCommand: normalizeVerifyCommand(raw.verifyCommand),
       }
     } catch {
       // 配置损坏时回退默认

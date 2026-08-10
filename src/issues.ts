@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -29,11 +30,21 @@ export interface PublishAndMergeOptions {
   autoMerge?: boolean
   /** 合并失败后的重试等待（毫秒，默认 30_000） */
   retryDelayMs?: number
+  /** 可选验证命令（验证门）：push 前在分支临时 worktree 执行，非零退出抛 VerifyFailedError 不发版 */
+  verifyCommand?: string
 }
 
 export interface PublishAndMergeResult {
   pr: PullRequest
   merged: boolean
+}
+
+/** 验证门失败：发布流水线 push 前验证未通过（调用方据此留言说明并停止本轮，不发版） */
+export class VerifyFailedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'VerifyFailedError'
+  }
 }
 
 /** 等待（用全局 setTimeout，便于测试注入假定时器） */
@@ -103,13 +114,66 @@ export async function mergePullRequest(opts: {
 }
 
 /**
- * 发布流水线（T8）：推送分支 → 创建 PR →（可选）squash 合并。
+ * 验证门（issue #22）：为分支创建临时 worktree（分支头的干净检出，随用随删），
+ * 在其中执行验证命令（/bin/sh -c）。零退出通过；非零退出抛 VerifyFailedError（含输出）。
+ *
+ * 不用沙箱 worktree：sandcastle 在成功后（无未提交改动）会清理 worktree，
+ * 且其 node_modules 是 Linux 平台产物；临时 worktree 校验的是「将要推送的分支头」
+ * 的干净检出状态，语义更强。验证命令需自行准备依赖（如
+ * `pnpm install --frozen-lockfile && pnpm typecheck`），与沙箱共享宿主 pnpm store，秒级完成。
+ */
+async function runVerifyGate(opts: {
+  command: string
+  branch: string
+  projectDir: string
+}): Promise<void> {
+  const { command, branch, projectDir } = opts
+  // 沙箱 worktree 同名命名（斜杠→连字符），前缀 .verify- 避免与 sandcastle 产物冲突
+  const tmpDir = join(
+    projectDir,
+    '.sandcastle',
+    'worktrees',
+    `.verify-${branch.replace(/\//g, '-')}`,
+  )
+  const git = (args: string[]) => execFileAsync('git', args, { cwd: projectDir })
+  // 幂等清理上次遗留的临时 worktree（不存在时忽略）
+  await git(['worktree', 'remove', '--force', tmpDir]).catch(() => undefined)
+  // --force：分支可能仍被保留的沙箱 worktree 检出（done + 有未提交改动的场景）
+  await git(['worktree', 'add', '--force', tmpDir, branch])
+  try {
+    await execFileAsync('/bin/sh', ['-c', command], { cwd: tmpDir, maxBuffer: 10 * 1024 * 1024 })
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; code?: number | null; message?: string }
+    const output = [e.stdout, e.stderr]
+      .filter((x): x is string => typeof x === 'string' && x.length > 0)
+      .join('\n')
+      .trim()
+    const detail = output || e.message || '（无输出）'
+    throw new VerifyFailedError(
+      `验证命令「${command}」失败（exit ${e.code ?? '非零'}）：\n${detail}`,
+    )
+  } finally {
+    // 无论成败都清理临时 worktree
+    await git(['worktree', 'remove', '--force', tmpDir]).catch(() => undefined)
+  }
+}
+
+/**
+ * 发布流水线（T8）：验证门（可选）→ 推送分支 → 创建 PR →（可选）squash 合并。
+ * 配置了 verifyCommand 时，push 前在分支临时 worktree 执行验证，非零退出即停摆（不发版）。
  * 合并失败先等 retryDelayMs（默认 30 秒）重试一次；重试成功即完成，仍失败则抛出
- * 保留 gh 原始输出的错误。后续合并行为（预同步/验证门/冲突兜底）都插在这唯一的出口。
+ * 保留 gh 原始输出的错误。后续合并行为（预同步/冲突兜底）都插在这唯一的出口。
  */
 export async function publishAndMerge(
   opts: PublishAndMergeOptions,
 ): Promise<PublishAndMergeResult> {
+  if (opts.verifyCommand) {
+    await runVerifyGate({
+      command: opts.verifyCommand,
+      branch: opts.branch,
+      projectDir: opts.projectDir,
+    })
+  }
   await pushBranch(opts.branch, opts.projectDir)
   const pr = await createPullRequest({
     branch: opts.branch,

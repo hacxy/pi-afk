@@ -8,7 +8,7 @@ import { projectPromptPath, resolvePromptFile } from './prompts.js'
  * 全部为只读信息：配置 / 模板路径 / 镜像状态 / gh 状态。
  */
 export interface DoctorFacts {
-  /** 生效的全局配置（4 字段） */
+  /** 生效的全局配置（5 字段） */
   config: GlobalConfig
   /** 实际生效的模板绝对路径 */
   templatePath: string
@@ -67,6 +67,7 @@ export function doctorReport(facts: DoctorFacts): string {
     `  model:     ${config.model}`,
     `  labels:    ${config.labels.length > 0 ? config.labels.join(', ') : '（无——不过滤）'}`,
     `  autoMerge: ${config.autoMerge ? 'on' : 'off'}`,
+    `  verify:    ${config.verifyCommand ?? '（无——跳过验证）'}`,
     '',
     `模板: ${templatePath} ${sourceLabel}`,
     '',

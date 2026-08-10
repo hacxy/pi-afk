@@ -32,7 +32,7 @@ const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
   DEEPSEEK_API_KEY      deepseek API key（必填）
 
 配置:
-  全局: ~/.afk/config.json（image / model / labels / autoMerge）
+  全局: ~/.afk/config.json（image / model / labels / autoMerge / verifyCommand）
 
 模板:
   项目 .sandcastle/prompt.md（自定义，可提交 git）> 包内默认 prompts/prompt.md
@@ -183,6 +183,9 @@ function printEvents(events: LoopEvent[]): void {
         break
       case 'issue-commented':
         console.log(`  留言: ${e.reason}`)
+        break
+      case 'verify-failed':
+        console.error(`  ✗ 验证未通过，未发布（issue #${e.issue.number}）: ${e.reason}`)
         break
       case 'no-more-tasks':
         console.log('完成：没有可处理的开放 issue。')

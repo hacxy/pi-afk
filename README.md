@@ -57,6 +57,11 @@
    · done + 有提交 → push 分支 → 创建 PR
      （PR body 含 "Closes #N"，合并后
        GitHub 自动关闭 issue）
+   · 配置了 verifyCommand 时 → push 前在
+     分支临时 worktree 执行验证命令：
+       零退出 → 正常发布
+       非零退出 → 留言说明验证失败、
+       不 push 不发版、该 issue 本轮停止
    · done + 无提交 → 留言警告，不建 PR
    · blocked/skipped → issue 留言说明原因，
      本轮跳过
@@ -73,6 +78,7 @@
 - **进度锚点**：prompt 中注入最近 10 条 `Ralph:` 提交，让 agent 知道之前的进度
 - **依赖顺序**：issue 按编号升序处理 —— 配合按依赖顺序创建 issue 的规范，先被依赖的先实现
 - **合并重试**：autoMerge 合并失败先等 30 秒重试一次（PR 刚创建时 GitHub 尚未算好可合并性），重试仍失败则报错并保留 gh 原始输出
+- **验证门（可选）**：配置 `verifyCommand`（如 `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test:run`）后，发布流水线在 push 前于分支临时 worktree 执行该命令（干净检出，随用随删，不依赖沙箱 worktree 生命周期），非零退出即停摆——留言说明验证失败、不发版、该 issue 本轮停止；默认不配置 = 信任 agent 声明（行为与现状一致）
 
 ---
 
@@ -134,7 +140,7 @@ afk 1
 
 ### 诊断：`afk doctor`
 
-对配置/模板“黑盒”问题的排查入口——一次性显示合并后的生效配置（4 字段）、实际使用的模板绝对路径、沙箱镜像是否存在、gh 是否登录：
+对配置/模板“黑盒”问题的排查入口——一次性显示合并后的生效配置（5 字段）、实际使用的模板绝对路径、沙箱镜像是否存在、gh 是否登录：
 
 ```bash
 cd 你的项目 && afk doctor
@@ -148,6 +154,7 @@ cd 你的项目 && afk doctor
   model:     deepseek/deepseek-v4-flash
   labels:    （无——不过滤）
   autoMerge: off
+  verify:    （无——跳过验证）
 
 模板: /path/to/.sandcastle/prompt.md （项目自定义）
 
@@ -170,7 +177,7 @@ cd 你的项目 && afk doctor
 
 ### 全局配置 `~/.afk/config.json`
 
-全局唯一配置源（跨所有项目共享），只保留 4 个用户真正会改的字段：
+全局唯一配置源（跨所有项目共享），只保留 5 个用户真正会改的字段：
 
 ```jsonc
 {
@@ -178,8 +185,11 @@ cd 你的项目 && afk doctor
   "model": "deepseek/deepseek-v4-flash", // 沙箱 agent 模型（pi 的 provider/model 格式）
   "labels": [], // 拉取 issue 的标签（数组，任一命中即拉取；空数组 = 不过滤全部拉取）
   "autoMerge": false, // 可选：done 后自动 squash 合并 PR
+  "verifyCommand": "", // 可选：发布（T8）push 前在分支临时 worktree 执行的验证命令（如 "pnpm install --frozen-lockfile && pnpm typecheck && pnpm test:run"）；空/缺失 = 跳过验证，信任 agent 声明
 }
 ```
+
+> `verifyCommand` 为验证门：配置后每次发布前在分支临时 worktree（干净检出，随用随删）执行该命令，非零退出即停摆——留言说明验证失败、不发版、该 issue 本轮停止；零退出则正常继续发布。命令需自行准备依赖（如 `pnpm install --frozen-lockfile`，与沙箱共享宿主 pnpm store，秒级完成）。
 
 > 旧配置的 `label`（字符串或数组）字段会被自动迁移为 `labels` 数组，无需手动改。
 
