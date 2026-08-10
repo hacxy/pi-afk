@@ -6,10 +6,14 @@ settings:
 
 importers:
   .:
-    devDependencies:
+    dependencies:
       '@ai-hero/sandcastle':
         specifier: ^0.12.0
         version: 0.12.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
       '@hacxy/eslint-config':
         specifier: ^0.14.0
         version: 0.14.0(@typescript-eslint/eslint-plugin@8.66.0(@typescript-eslint/parser@8.66.0(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
@@ -19,6 +23,9 @@ importers:
       '@hacxy/tsconfig':
         specifier: ^0.14.0
         version: 0.14.0
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
       eslint:
         specifier: ^9.0.0
         version: 9.39.5(supports-color@7.2.0)
@@ -42,7 +49,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(supports-color@7.2.0)
+        version: 2.1.9(@types/node@26.2.0)(supports-color@7.2.0)
 
 packages:
   '@ai-hero/sandcastle@0.12.0':
@@ -1153,6 +1160,12 @@ packages:
     resolution:
       {
         integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==,
+      }
+
+  '@types/node@26.2.0':
+    resolution:
+      {
+        integrity: sha512-5IviulTZeRNp2vAJ514cc/HUlY5nZ9fCbq9DMyC52BrhFZACo3nI0R7qBxhQmo/d27NFe96ur/b7Wwxklda+kg==,
       }
 
   '@typescript-eslint/eslint-plugin@8.66.0':
@@ -2792,6 +2805,12 @@ packages:
         integrity: sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA==,
       }
 
+  undici-types@8.3.0:
+    resolution:
+      {
+        integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==,
+      }
+
   update-browserslist-db@1.3.0:
     resolution:
       {
@@ -2921,6 +2940,12 @@ packages:
         integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==,
       }
     engines: { node: '>=10' }
+
+  zod@4.4.3:
+    resolution:
+      {
+        integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==,
+      }
 
 snapshots:
   '@ai-hero/sandcastle@0.12.0':
@@ -3353,6 +3378,10 @@ snapshots:
 
   '@types/json-schema@7.0.15': {}
 
+  '@types/node@26.2.0':
+    dependencies:
+      undici-types: 8.3.0
+
   '@typescript-eslint/eslint-plugin@8.66.0(@typescript-eslint/parser@8.66.0(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)':
     dependencies:
       '@eslint-community/regexpp': 4.12.2
@@ -3451,13 +3480,13 @@ snapshots:
       chai: 5.3.3
       tinyrainbow: 1.2.0
 
-  '@vitest/mocker@2.1.9(vite@5.4.21)':
+  '@vitest/mocker@2.1.9(vite@5.4.21(@types/node@26.2.0))':
     dependencies:
       '@vitest/spy': 2.1.9
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 5.4.21
+      vite: 5.4.21(@types/node@26.2.0)
 
   '@vitest/pretty-format@2.1.9':
     dependencies:
@@ -4356,6 +4385,8 @@ snapshots:
 
   ufo@1.6.4: {}
 
+  undici-types@8.3.0: {}
+
   update-browserslist-db@1.3.0(browserslist@4.28.8):
     dependencies:
       browserslist: 4.28.8
@@ -4366,13 +4397,13 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  vite-node@2.1.9(supports-color@7.2.0):
+  vite-node@2.1.9(@types/node@26.2.0)(supports-color@7.2.0):
     dependencies:
       cac: 6.7.14
       debug: 4.4.3(supports-color@7.2.0)
       es-module-lexer: 1.7.0
       pathe: 1.1.2
-      vite: 5.4.21
+      vite: 5.4.21(@types/node@26.2.0)
     transitivePeerDependencies:
       - '@types/node'
       - less
@@ -4384,18 +4415,19 @@ snapshots:
       - supports-color
       - terser
 
-  vite@5.4.21:
+  vite@5.4.21(@types/node@26.2.0):
     dependencies:
       esbuild: 0.21.5
       postcss: 8.5.26
       rollup: 4.62.4
     optionalDependencies:
+      '@types/node': 26.2.0
       fsevents: 2.3.3
 
-  vitest@2.1.9(supports-color@7.2.0):
+  vitest@2.1.9(@types/node@26.2.0)(supports-color@7.2.0):
     dependencies:
       '@vitest/expect': 2.1.9
-      '@vitest/mocker': 2.1.9(vite@5.4.21)
+      '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@26.2.0))
       '@vitest/pretty-format': 2.1.9
       '@vitest/runner': 2.1.9
       '@vitest/snapshot': 2.1.9
@@ -4411,9 +4443,11 @@ snapshots:
       tinyexec: 0.3.2
       tinypool: 1.1.1
       tinyrainbow: 1.2.0
-      vite: 5.4.21
-      vite-node: 2.1.9(supports-color@7.2.0)
+      vite: 5.4.21(@types/node@26.2.0)
+      vite-node: 2.1.9(@types/node@26.2.0)(supports-color@7.2.0)
       why-is-node-running: 2.3.0
+    optionalDependencies:
+      '@types/node': 26.2.0
     transitivePeerDependencies:
       - less
       - lightningcss
@@ -4445,3 +4479,5 @@ snapshots:
   yaml@2.9.0: {}
 
   yocto-queue@0.1.0: {}
+
+  zod@4.4.3: {}
