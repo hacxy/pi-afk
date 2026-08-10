@@ -105,6 +105,21 @@ export async function createPullRequest(opts: {
   return { url, number: numMatch ? Number(numMatch[1]) : 0 }
 }
 
+/**
+ * 宿主侧刷新 origin/main（git fetch origin main）。
+ * 沙箱 worktree 将从 origin/main 创建（而非过期的本地 HEAD），
+ * 避免新 PR 携带已合入 main 的重复提交（hacxy.cn #23 事故）。
+ * fetch 失败时抛出错误，由调用方降级为本地 HEAD 基线（不阻断流程）。
+ */
+export async function fetchOriginMain(projectDir: string): Promise<void> {
+  try {
+    await execFileAsync('git', ['fetch', 'origin', 'main'], { cwd: projectDir })
+  } catch (err) {
+    const detail = (err as { stderr?: string; message?: string }).stderr ?? (err as Error).message
+    throw new Error(`git fetch origin main 失败: ${detail}`)
+  }
+}
+
 /** 宿主侧取最近 Ralph 提交（进度锚点） */
 export async function recentRalphCommits(projectDir: string): Promise<string> {
   try {
