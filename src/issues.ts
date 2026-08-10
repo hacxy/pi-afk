@@ -49,15 +49,6 @@ export async function commentOnIssue(issueNumber: number, body: string): Promise
   await gh(['issue', 'comment', String(issueNumber), '--body', body])
 }
 
-/** 关闭 issue（可带说明） */
-export async function closeIssue(issueNumber: number, comment?: string): Promise<void> {
-  const args = ['issue', 'close', String(issueNumber)]
-  if (comment) {
-    args.push('--comment', comment)
-  }
-  await gh(args)
-}
-
 /** 推送本地分支到 origin（在项目目录执行） */
 export async function pushBranch(branch: string, projectDir: string): Promise<void> {
   const { stdout, stderr } = await execFileAsync('git', ['push', '-u', 'origin', branch], {
@@ -122,19 +113,5 @@ export async function recentRalphCommits(projectDir: string): Promise<string> {
     return stdout.trim() || '（暂无 Ralph 提交）'
   } catch {
     return '（暂无 Ralph 提交）'
-  }
-}
-
-/** 获取仓库名（用于 PR 标题/日志） */
-export async function repoName(projectDir: string): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync('git', ['config', '--get', 'remote.origin.url'], {
-      cwd: projectDir,
-    })
-    const url = stdout.trim()
-    const base = url.split('/').pop() ?? ''
-    return base.replace(/\.git$/, '')
-  } catch {
-    return 'unknown'
   }
 }

@@ -30,7 +30,7 @@ const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
 
 配置:
   全局: ~/.afk/config.json
-  项目: ./.afkrc.json（可选，可覆盖 label / maxIterations）
+  项目: ./.afkrc.json（可选，可覆盖 label）
 `
 
 // ---------------------------------------------------------------------------

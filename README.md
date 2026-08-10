@@ -156,7 +156,6 @@ afk 1
 ```jsonc
 {
   "label": "afk", // 覆盖全局 label
-  "maxIterations": 5, // 单次运行上限
 }
 ```
 

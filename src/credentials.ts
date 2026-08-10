@@ -8,11 +8,6 @@ export function getDeepseekKey(): string | undefined {
   return key && key.trim().length > 0 ? key : undefined
 }
 
-export function getGhToken(): string | undefined {
-  const token = process.env.GH_TOKEN
-  return token && token.trim().length > 0 ? token : undefined
-}
-
 export function requireDeepseekKey(): string {
   const key = getDeepseekKey()
   if (!key) {

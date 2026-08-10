@@ -1,6 +1,6 @@
 import type { Issue } from './issues.js'
 
-import { readFileSync, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,10 +35,6 @@ export function resolvePromptFile(opts: { configPromptFile?: string; name?: stri
   }
   // 3. 包内默认
   return promptFilePath(name)
-}
-
-export function loadPrompt(name = 'ralph.md'): string {
-  return readFileSync(promptFilePath(name), 'utf8')
 }
 
 /** 组装单 issue 的 promptArgs（供 sandcastle 替换 {{KEY}}） */

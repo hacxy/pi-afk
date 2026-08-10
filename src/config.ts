@@ -61,8 +61,6 @@ export function loadGlobalConfig(): GlobalConfig {
 export interface ProjectConfig {
   /** 覆盖全局 label */
   label?: string
-  /** 单次运行最大迭代数（未指定时用 CLI 参数） */
-  maxIterations?: number
 }
 
 export function loadProjectConfig(projectDir: string): ProjectConfig {

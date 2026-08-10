@@ -14,17 +14,15 @@ export {
 export type { GlobalConfig, ProjectConfig } from './config.js'
 
 // 凭据
-export { getDeepseekKey, getGhToken, requireDeepseekKey } from './credentials.js'
+export { getDeepseekKey, requireDeepseekKey } from './credentials.js'
 
 // GitHub issues
 export {
   listAfkIssues,
   commentOnIssue,
-  closeIssue,
   pushBranch,
   createPullRequest,
   recentRalphCommits,
-  repoName,
 } from './issues.js'
 export type { Issue, PullRequest } from './issues.js'
 
@@ -33,7 +31,7 @@ export { runIssueInSandbox, outcomeSchema } from './sandbox.js'
 export type { Outcome, RunIssueOptions, RunIssueResult } from './sandbox.js'
 
 // 提示词
-export { promptFilePath, loadPrompt, buildIssuePromptArgs } from './prompts.js'
+export { promptFilePath, buildIssuePromptArgs } from './prompts.js'
 
 // 日志
 export { appendLog } from './log.js'
