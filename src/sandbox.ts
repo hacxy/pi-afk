@@ -102,6 +102,7 @@ export async function runIssueInSandbox(opts: RunIssueOptions): Promise<RunIssue
     copyToWorktree.push('node_modules')
   }
 
+  // promptFile + promptArgs 才能做 {{KEY}} 占位符替换（resolvePromptFile 返回绝对路径）
   const result = await run({
     name: opts.branch,
     cwd: opts.projectDir,
@@ -114,6 +115,7 @@ export async function runIssueInSandbox(opts: RunIssueOptions): Promise<RunIssue
     branchStrategy: { type: 'branch', branch: opts.branch },
     copyToWorktree: copyToWorktree.length > 0 ? copyToWorktree : undefined,
     hooks,
+    promptFile: opts.promptFile,
     promptArgs: opts.promptArgs,
     completionSignal: opts.completionSignal,
     output: Output.object({ tag: 'outcome', schema: outcomeSchema }),
