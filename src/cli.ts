@@ -14,6 +14,7 @@ import {
   type GlobalConfig,
 } from './config.js'
 import { requireDeepseekKey } from './credentials.js'
+import { collectDoctorFacts, doctorReport, startupTemplateLine } from './doctor.js'
 import { appendLog } from './log.js'
 import { runAfkLoop, type LoopEvent } from './loop.js'
 import { ensureProjectPrompt, ensureSandcastleGitignore } from './prompts.js'
@@ -24,6 +25,7 @@ const USAGE = `pi-afk —— 基于 sandcastle 的 AFK 循环编排器
 用法:
   afk <迭代次数>        在当前项目目录运行 AFK 循环（处理带 label 的开放 issue）
   afk init              初始化：构建沙箱镜像、生成全局配置、复制项目模板、检查凭据
+  afk doctor            诊断：生效配置 / 模板路径 / 镜像与 gh 状态（纯只读，无副作用）
   afk --help            显示帮助
 
 环境变量:
@@ -216,15 +218,25 @@ async function main(): Promise<void> {
     return
   }
 
+  if (argv[0] === 'doctor') {
+    // 纯诊断：只读配置/模板/镜像/gh，不做任何写操作（不生成配置、不建镜像、不复制模板）
+    console.log(doctorReport(collectDoctorFacts(projectDir)))
+    return
+  }
+
   const iterations = Number(argv[0])
   if (!Number.isInteger(iterations) || iterations < 1) {
     console.error(`用法: afk <迭代次数>   （正整数，如 afk 10）`)
     console.error(`      afk init`)
+    console.error(`      afk doctor`)
     process.exitCode = 3
     return
   }
 
   const cfg = loadGlobalConfig()
+
+  // 启动打印：当前生效的模板路径（项目 .sandcastle/prompt.md 或包内默认）
+  console.log(startupTemplateLine(projectDir))
 
   // 运行时前置检查（自动初始化：配置/镜像/gitignore，无需手动 afk init）
   if (!ensureRuntime(cfg, projectDir)) {

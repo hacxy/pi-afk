@@ -126,6 +126,34 @@ gh issue create --title "实现 xxx" --body "请实现 xxx，并添加测试" --
 afk 1
 ```
 
+每次 `afk <N>` 启动时会打印一行当前生效的模板路径（`→ 使用模板: <绝对路径>`），随时可见模板来自哪一层。
+
+### 诊断：`afk doctor`
+
+对配置/模板“黑盒”问题的排查入口——一次性显示合并后的生效配置（4 字段）、实际使用的模板绝对路径、沙箱镜像是否存在、gh 是否登录：
+
+```bash
+cd 你的项目 && afk doctor
+```
+
+```
+=== afk doctor ===
+
+配置（生效合并值）:
+  image:     pi-afk:latest
+  model:     deepseek/deepseek-v4-flash
+  label:     afk
+  autoMerge: off
+
+模板: /path/to/.sandcastle/prompt.md （项目自定义）
+
+检查项:
+  ✓ 沙箱镜像: 存在
+  ✓ gh 登录: 已登录
+```
+
+`afk doctor` 是**纯只读诊断**：不生成配置、不构建镜像、不复制模板，无任何副作用；无配置文件/无自定义模板的干净环境也能正常输出（显示默认值）。
+
 ---
 
 ## 配置
