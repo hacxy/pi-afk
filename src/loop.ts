@@ -27,7 +27,12 @@ import {
   resolveResolvePromptFile,
   buildResolvePromptArgs,
 } from './prompts.js'
-import { runIssueInSandbox, type Outcome, type RunIssueResult } from './sandbox.js'
+import {
+  runIssueInSandbox,
+  type Outcome,
+  type RunIssueResult,
+  type AgentStreamEvent,
+} from './sandbox.js'
 
 // ---------------------------------------------------------------------------
 // 事件模型：结构化事件数组，为并行与 Web UI 预留
@@ -65,6 +70,37 @@ export interface LoopOptions {
   config: GlobalConfig
   /** deepseek key */
   deepseekKey: string
+  /** 事件实时回调（issue #34）：LoopEvent 发生时立即回调（terminal 实时打印）；
+   *  缺省 = 静默，调用方自行消费返回的事件数组（库语义不变） */
+  onEvent?: (event: LoopEvent) => void
+  /** agent 流式输出回调（issue #34）：沙箱实时输出（文本/工具调用/原始行）转发到终端；
+   *  日志文件仍由 sandcastle 完整写入（#33 的 .sandcastle/logs/issue-<N>.log） */
+  onAgentStreamEvent?: (event: AgentStreamEvent) => void
+}
+
+/** push 事件的同时立即通知 onEvent 回调（issue #34：terminal 实时打印，不等 run 结束） */
+function emitEvent(events: LoopEvent[], sink: LoopOptions['onEvent'], event: LoopEvent): void {
+  events.push(event)
+  sink?.(event)
+}
+
+/**
+ * issue #34：把 sandcastle agent 流事件格式化为终端输出文本（非交互终端/管道同样适用，无 ANSI）。
+ * - text：文本原样透传（不追加换行，保持流式连贯）
+ * - toolCall：工具调用折叠为一行（多行参数压成单行）
+ * - raw：原始行原样输出（行尾补换行）
+ */
+export function formatAgentStreamEvent(event: AgentStreamEvent): string {
+  switch (event.type) {
+    case 'text':
+      return event.message
+    case 'toolCall': {
+      const args = event.formattedArgs.replace(/\s+/g, ' ').trim()
+      return `⚙ ${event.name}: ${args}\n`
+    }
+    case 'raw':
+      return `${event.line}\n`
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +149,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
       case 'skip-merged': {
         // merged PR 已处理：issue 留言 + 跳过（不启动沙箱）
         await commentOnIssue(issue.number, buildAlreadyMergedComment(decision.prNumber))
-        events.push({ type: 'pr-exists-merged', issue, prNumber: decision.prNumber })
+        emitEvent(events, opts.onEvent, {
+          type: 'pr-exists-merged',
+          issue,
+          prNumber: decision.prNumber,
+        })
         appendLog(logDir, {
           type: 'convergence-skip',
           issueNumber: issue.number,
@@ -125,7 +165,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
       case 'skip-open-clean': {
         // open + clean + autoMerge 关：不重做、不自动合，issue 留言待人工合并（保留 review 语义）
         await commentOnIssue(issue.number, buildPendingManualMergeComment(decision.prNumber))
-        events.push({ type: 'pr-pending-manual-merge', issue, prNumber: decision.prNumber })
+        emitEvent(events, opts.onEvent, {
+          type: 'pr-pending-manual-merge',
+          issue,
+          prNumber: decision.prNumber,
+        })
         appendLog(logDir, {
           type: 'convergence-skip',
           issueNumber: issue.number,
@@ -141,7 +185,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           buildDirtyPrComment(decision.prNumber),
           opts.projectDir,
         )
-        events.push({ type: 'pr-conflict-skip', issue, prNumber: decision.prNumber })
+        emitEvent(events, opts.onEvent, {
+          type: 'pr-conflict-skip',
+          issue,
+          prNumber: decision.prNumber,
+        })
         appendLog(logDir, {
           type: 'convergence-skip',
           issueNumber: issue.number,
@@ -154,7 +202,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
         // open + clean + autoMerge 开：直接合并现有 PR 完成闭环（如 merge 失败的残留 PR，
         // 下次 run 自动补合并）；PR body 的 Closes #N 随之关闭 issue
         await mergeExistingPullRequest({ prNumber: decision.prNumber, projectDir: opts.projectDir })
-        events.push({ type: 'issue-merged', issue, prNumber: decision.prNumber })
+        emitEvent(events, opts.onEvent, {
+          type: 'issue-merged',
+          issue,
+          prNumber: decision.prNumber,
+        })
         appendLog(logDir, {
           type: 'issue-result',
           issueNumber: issue.number,
@@ -197,10 +249,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
       promptFile: resolvePromptFile(opts.projectDir),
       promptArgs,
       logPath: join(logDir, `issue-${issue.number}.log`),
+      onAgentStreamEvent: opts.onAgentStreamEvent,
     })
 
     const { outcome } = result
-    events.push({
+    emitEvent(events, opts.onEvent, {
       type: 'issue-outcome',
       issue,
       status: outcome.status,
@@ -212,7 +265,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
       case 'done': {
         if (result.commits.length === 0) {
           // agent 声称完成但无提交——不推 PR，只留事件，交由用户判断
-          events.push({
+          emitEvent(events, opts.onEvent, {
             type: 'issue-commented',
             issue,
             reason: 'agent 报告 done 但没有任何 commit，未创建 PR',
@@ -238,7 +291,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           // 预同步冲突（T11/T13）：不再直接停摆——派发第二次沙箱 run（resolve run）自动解冲突；
           // 成功 → 发布流水线（分支已含 origin/main，PR 干净自动合并）；失败 → 回退 T11 兜底
           // （push + PR + 留言冲突清单）。该 issue 本轮无论如何都结束（防重复处理）。
-          events.push({ type: 'presync-conflict', issue, files: published.presyncConflict.files })
+          emitEvent(events, opts.onEvent, {
+            type: 'presync-conflict',
+            issue,
+            files: published.presyncConflict.files,
+          })
           appendLog(logDir, {
             type: 'presync-conflict',
             issueNumber: issue.number,
@@ -254,7 +311,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           events.push(...resolveEvents)
         } else {
           if (published.pr) {
-            events.push({
+            emitEvent(events, opts.onEvent, {
               type: 'pull-request',
               issue,
               url: published.pr.url,
@@ -263,7 +320,11 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           }
           // AFK 切片语义：合并后 GitHub 自动关 issue（合并失败已由流水线重试，重试仍失败抛错）
           if (published.merged && published.pr) {
-            events.push({ type: 'issue-merged', issue, prNumber: published.pr.number })
+            emitEvent(events, opts.onEvent, {
+              type: 'issue-merged',
+              issue,
+              prNumber: published.pr.number,
+            })
           }
         }
         break
@@ -274,7 +335,7 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
           issue.number,
           `Ralph 未能完成此 issue（status: ${outcome.status}）。原因：\n\n${outcome.summary}`,
         )
-        events.push({
+        emitEvent(events, opts.onEvent, {
           type: 'issue-commented',
           issue,
           reason: `${outcome.status}: ${outcome.summary}`,
@@ -301,11 +362,15 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
         `Ralph 验证未通过，未发布（未创建 PR）。验证命令输出：\n\n${reason}`,
       )
       appendLog(logDir, { type: 'verify-failed', issueNumber: issue.number, message: reason })
-      return [...events, { type: 'verify-failed', issue, reason }]
+      const verifyFailed: LoopEvent = { type: 'verify-failed', issue, reason }
+      emitEvent(events, opts.onEvent, verifyFailed)
+      return events
     }
     const message = err instanceof Error ? err.message : String(err)
     appendLog(logDir, { type: 'error', issueNumber: issue.number, message })
-    return [{ type: 'error', message, issue }]
+    const errorEvent: LoopEvent = { type: 'error', message, issue }
+    emitEvent(events, opts.onEvent, errorEvent)
+    return events
   }
 }
 
@@ -348,8 +413,13 @@ async function resolveConflictAndPublish(opts: {
       projectDir: loop.projectDir,
       files: conflict.files,
     })
-    events.push({ type: 'pull-request', issue, url: pr.url, prNumber: pr.number })
-    events.push({ type: 'resolve-failed', issue, reason })
+    emitEvent(events, loop.onEvent, {
+      type: 'pull-request',
+      issue,
+      url: pr.url,
+      prNumber: pr.number,
+    })
+    emitEvent(events, loop.onEvent, { type: 'resolve-failed', issue, reason })
     appendLog(logDir, { type: 'resolve-failed', issueNumber: issue.number, reason })
   }
 
@@ -369,6 +439,7 @@ async function resolveConflictAndPublish(opts: {
         mergeSha: conflict.mergeSha,
       }),
       logPath: join(logDir, `issue-${issue.number}-resolve.log`),
+      onAgentStreamEvent: loop.onAgentStreamEvent,
     })
   } catch (err) {
     // 沙箱/基础设施错误：按失败回退（分支照常推送 + PR + 留言），不抛错不阻塞循环
@@ -409,7 +480,7 @@ async function resolveConflictAndPublish(opts: {
     return events
   }
   if (published.pr) {
-    events.push({
+    emitEvent(events, loop.onEvent, {
       type: 'pull-request',
       issue,
       url: published.pr.url,
@@ -417,7 +488,7 @@ async function resolveConflictAndPublish(opts: {
     })
   }
   if (published.merged && published.pr) {
-    events.push({ type: 'issue-merged', issue, prNumber: published.pr.number })
+    emitEvent(events, loop.onEvent, { type: 'issue-merged', issue, prNumber: published.pr.number })
   }
   return events
 }
@@ -433,7 +504,11 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
   const logDir = projectLogDir(opts.projectDir)
 
   for (let i = 1; i <= opts.iterations; i++) {
-    events.push({ type: 'iteration-start', iteration: i, total: opts.iterations })
+    emitEvent(events, opts.onEvent, {
+      type: 'iteration-start',
+      iteration: i,
+      total: opts.iterations,
+    })
     appendLog(logDir, { type: 'iteration-start', iteration: i })
 
     let issues: Issue[]
@@ -441,7 +516,7 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
       issues = await listAfkIssues(opts.config.labels)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      events.push({ type: 'error', message })
+      emitEvent(events, opts.onEvent, { type: 'error', message })
       break
     }
 
@@ -449,12 +524,12 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
     if (!issue) {
       // 没有可自动处理的 issue 时，告知待人工的 HITL 切片数
       const hitlPending = countHitlPending(issues)
-      events.push({ type: 'no-more-tasks', hitlPending })
+      emitEvent(events, opts.onEvent, { type: 'no-more-tasks', hitlPending })
       appendLog(logDir, { type: 'no-more-tasks', hitlPending })
       break
     }
 
-    events.push({ type: 'issue-picked', issue })
+    emitEvent(events, opts.onEvent, { type: 'issue-picked', issue })
     appendLog(logDir, {
       type: 'issue-picked',
       issueNumber: issue.number,

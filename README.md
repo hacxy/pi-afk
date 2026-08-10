@@ -308,6 +308,7 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 
 - **每次 issue 的沙箱日志**：`.sandcastle/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）；预同步冲突派发的 resolve run 为 `.sandcastle/logs/issue-<N>-resolve.log`
 - **事件流**：`.sandcastle/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
+- **终端实时输出**（issue #34）：运行 `afk <N>` 时，事件（迭代开始 / 选中 issue / 结果 / 建 PR / 预同步冲突 / 验证失败 / 错误等）在**发生时立即打印**到终端，沙箱 agent 的实时输出同步**流式透传**——文本原样输出、工具调用折叠为一行、原始行原样输出；同时日志文件仍完整写入（见上，实时显示不影响落盘）。run 结束仅剩一行摘要（完成 N 个 issue、N 个 PR、N 个错误），**无重复输出**。非交互终端（管道 / 输出重定向）下行为一致（纯 stdout 写入，无 TUI、无 ANSI 转义依赖；对端提前关闭如 `afk 10 | head` 时静默退出不报错）
 
 日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result`（含收敛补合并 `merged-existing-pr`）/ `presync-conflict` / `presync-fetch-failed` / `resolve-success` / `resolve-failed` / `verify-failed` / `convergence-skip`（含 `reason: merged|open-clean|dirty`）/ `convergence-check-failed` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
 
