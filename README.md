@@ -61,6 +61,7 @@
    · blocked/skipped → issue 留言说明原因，
      本轮跳过
    · autoMerge 开启时 → 自动 squash 合并 PR
+     （合并失败等 30 秒重试一次，仍失败报错保留 gh 输出）
 10. 写事件日志（~/.afk/logs/afk.jsonl）
 11. 进入下一个 issue
 ```
@@ -71,6 +72,7 @@
 - **完成信号**：agent 输出 `<promise>COMPLETE</promise>` 结束一轮；结构化输出 `<outcome>` 是 zod 校验的 JSON（`{ status: 'done'|'blocked'|'skipped', summary }`），校验失败自动重试
 - **进度锚点**：prompt 中注入最近 10 条 `Ralph:` 提交，让 agent 知道之前的进度
 - **依赖顺序**：issue 按编号升序处理 —— 配合按依赖顺序创建 issue 的规范，先被依赖的先实现
+- **合并重试**：autoMerge 合并失败先等 30 秒重试一次（PR 刚创建时 GitHub 尚未算好可合并性），重试仍失败则报错并保留 gh 原始输出
 
 ---
 

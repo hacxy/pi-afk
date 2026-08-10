@@ -4,12 +4,10 @@ import { LOG_DIR, type GlobalConfig } from './config.js'
 import {
   listAfkIssues,
   commentOnIssue,
-  createPullRequest,
-  pushBranch,
+  publishAndMerge,
   recentRalphCommits,
   fetchOriginMain,
   isHitlIssue,
-  mergePullRequest,
   type Issue,
 } from './issues.js'
 import { appendLog } from './log.js'
@@ -124,19 +122,18 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
           })
           break
         }
-        // 保守派：宿主统一推送 + 开 PR（凭据不进沙箱）
-        await pushBranch(branch, opts.projectDir)
-        const pr = await createPullRequest({
+        // 保守派：宿主统一推送 + 开 PR（凭据不进沙箱）；autoMerge 时由流水线自动 squash 合并
+        const { pr, merged } = await publishAndMerge({
           branch,
           title: `fix: issue #${issue.number} ${issue.title}`.slice(0, 100),
           body: `由 Ralph / pi-afk 自动生成\n\n${outcome.summary}\n\nCloses #${issue.number}`,
           projectDir: opts.projectDir,
+          autoMerge: opts.config.autoMerge,
         })
         events.push({ type: 'pull-request', issue, url: pr.url, prNumber: pr.number })
 
-        // AFK 切片语义：启用 autoMerge 时自动 squash 合并（合并后 GitHub 自动关 issue）
-        if (opts.config.autoMerge) {
-          await mergePullRequest({ prNumber: pr.number, projectDir: opts.projectDir })
+        // AFK 切片语义：合并后 GitHub 自动关 issue（合并失败已由流水线重试，重试仍失败抛错）
+        if (merged) {
           events.push({ type: 'issue-merged', issue, prNumber: pr.number })
         }
         break
