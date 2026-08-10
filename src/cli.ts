@@ -11,6 +11,7 @@ import {
   globalConfigPath,
   DEFAULT_GLOBAL_CONFIG,
   ensureGlobalDirs,
+  type GlobalConfig,
 } from './config.js'
 import { requireDeepseekKey } from './credentials.js'
 import { appendLog } from './log.js'
@@ -51,6 +52,69 @@ function ensureGlobalConfig(): void {
   }
 }
 
+/** 检查沙箱镜像，不存在则构建（全局一次，所有项目复用） */
+function ensureImage(cfg: GlobalConfig): boolean {
+  try {
+    execFileSync('docker', ['image', 'inspect', cfg.image], { stdio: 'ignore' })
+    return true
+  } catch {
+    // 不存在，构建
+  }
+  console.log(`→ 构建沙箱镜像 ${cfg.image}（首次约 1-2 分钟）...`)
+  const dockerfile = dockerfilePath()
+  const uid = process.getuid?.() ?? 1000
+  const gid = process.getgid?.() ?? 1000
+  try {
+    execFileSync(
+      'docker',
+      [
+        'build',
+        '-t',
+        cfg.image,
+        '--build-arg',
+        `AGENT_UID=${uid}`,
+        '--build-arg',
+        `AGENT_GID=${gid}`,
+        '-f',
+        dockerfile,
+        dirname(dockerfile),
+      ],
+      { stdio: 'inherit' },
+    )
+    console.log(`✓ 镜像构建完成: ${cfg.image}`)
+    return true
+  } catch {
+    console.error('✗ 镜像构建失败，请检查 docker 是否在运行（OrbStack）')
+    return false
+  }
+}
+
+/** 项目 .gitignore 追加 .sandcastle/（幂等，每项目仅一次生效） */
+function ensureGitignore(projectDir: string): void {
+  const gitignore = join(projectDir, '.gitignore')
+  if (existsSync(gitignore)) {
+    const content = readFileSync(gitignore, 'utf8')
+    if (!content.includes('.sandcastle/')) {
+      appendFileSync(gitignore, '\n# pi-afk 运行时工作区\n.sandcastle/\n', 'utf8')
+      console.log('✓ 已向 .gitignore 追加 .sandcastle/')
+    }
+  } else {
+    writeFileSync(gitignore, '.sandcastle/\n', 'utf8')
+    console.log('✓ 已创建 .gitignore（含 .sandcastle/）')
+  }
+}
+
+/** 运行时前置检查（afk <N> 每次自动执行，无需手动 init） */
+function ensureRuntime(cfg: GlobalConfig, projectDir: string): boolean {
+  ensureGlobalConfig()
+  ensureGlobalDirs()
+  ensureGitignore(projectDir)
+  if (!requireDeepseekKey()) {
+    return false
+  }
+  return ensureImage(cfg)
+}
+
 async function initCmd(projectDir: string): Promise<void> {
   const cfg = loadGlobalConfig()
 
@@ -75,51 +139,14 @@ async function initCmd(projectDir: string): Promise<void> {
   }
 
   // 4. 镜像（存在则跳过，否则构建）
-  try {
-    execFileSync('docker', ['image', 'inspect', cfg.image], { stdio: 'ignore' })
-    console.log(`✓ 沙箱镜像已存在: ${cfg.image}`)
-  } catch {
-    console.log(`→ 构建沙箱镜像 ${cfg.image}（首次约 1-2 分钟）...`)
-    const dockerfile = dockerfilePath()
-    const uid = process.getuid?.() ?? 1000
-    const gid = process.getgid?.() ?? 1000
-    try {
-      execFileSync(
-        'docker',
-        [
-          'build',
-          '-t',
-          cfg.image,
-          '--build-arg',
-          `AGENT_UID=${uid}`,
-          '--build-arg',
-          `AGENT_GID=${gid}`,
-          '-f',
-          dockerfile,
-          dirname(dockerfile),
-        ],
-        { stdio: 'inherit' },
-      )
-      console.log(`✓ 镜像构建完成: ${cfg.image}`)
-    } catch {
-      console.error('✗ 镜像构建失败，请检查 docker 是否在运行（OrbStack）')
-      process.exitCode = 1
-      return
-    }
+  if (ensureImage(cfg)) {
+    console.log(`✓ 沙箱镜像: ${cfg.image}`)
+  } else {
+    return
   }
 
   // 5. 项目 .gitignore 增加 .sandcastle/
-  const gitignore = join(projectDir, '.gitignore')
-  if (existsSync(gitignore)) {
-    const content = readFileSync(gitignore, 'utf8')
-    if (!content.includes('.sandcastle/')) {
-      appendFileSync(gitignore, '\n# pi-afk 运行时工作区\n.sandcastle/\n', 'utf8')
-      console.log('✓ 已向 .gitignore 追加 .sandcastle/')
-    }
-  } else {
-    writeFileSync(gitignore, '.sandcastle/\n', 'utf8')
-    console.log('✓ 已创建 .gitignore（含 .sandcastle/）')
-  }
+  ensureGitignore(projectDir)
 
   console.log('\n初始化完成。现在可以运行: afk 10')
 }
@@ -196,6 +223,13 @@ async function main(): Promise<void> {
 
   const cfg = loadGlobalConfig()
   const projectCfg = loadProjectConfig(projectDir)
+
+  // 运行时前置检查（自动初始化：配置/镜像/gitignore，无需手动 afk init）
+  if (!ensureRuntime(cfg, projectDir)) {
+    process.exitCode = 1
+    return
+  }
+
   const deepseekKey = requireDeepseekKey()
 
   const config = { ...cfg, label: projectCfg.label ?? cfg.label }
