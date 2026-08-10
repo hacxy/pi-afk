@@ -6,6 +6,7 @@ import {
   commentOnIssue,
   publishAndMerge,
   recentRalphCommits,
+  fetchOriginMain,
   isHitlIssue,
   type Issue,
 } from './issues.js'
@@ -73,12 +74,29 @@ async function processIssue(issue: Issue, opts: LoopOptions): Promise<LoopEvent[
     const recentCommits = await recentRalphCommits(opts.projectDir)
     const promptArgs = buildIssuePromptArgs({ issue, branch, recentCommits })
 
+    // 宿主先刷新 origin/main，worktree 从最新远端 main 创建（而非过期的本地 HEAD），
+    // 新 PR 不再携带已合入 main 的重复提交（hacxy.cn #23 事故）。
+    // fetch 失败降级为本地 HEAD 基线并记日志，不阻断流程（sandcastle 非致命哲学）。
+    let baseBranch: string | undefined
+    try {
+      await fetchOriginMain(opts.projectDir)
+      baseBranch = 'origin/main'
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      appendLog(LOG_DIR, {
+        type: 'fetch-origin-main-failed',
+        issueNumber: issue.number,
+        message,
+      })
+    }
+
     const result = await runIssueInSandbox({
       image: opts.config.image,
       model: opts.config.model,
       deepseekKey: opts.deepseekKey,
       projectDir: opts.projectDir,
       branch,
+      baseBranch,
       promptFile: resolvePromptFile(opts.projectDir),
       promptArgs,
       logPath: join(LOG_DIR, `issue-${issue.number}.log`),

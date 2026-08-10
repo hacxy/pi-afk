@@ -31,6 +31,8 @@ export interface RunIssueOptions {
   projectDir: string
   /** 工作分支名，如 agent/issue-12 */
   branch: string
+  /** worktree 创建基线 ref（如 origin/main）；缺省时 sandcastle 默认 HEAD */
+  baseBranch?: string
   /** prompt 模板绝对路径 */
   promptFile: string
   /** 注入 prompt 的参数 */
@@ -111,6 +113,18 @@ export function dockerBuildArgs(opts: {
   ]
 }
 
+/**
+ * branch 策略构建（branch 模式）：新分支从 baseBranch 创建。
+ * 未传 baseBranch 时省略该字段，sandcastle 回退到 HEAD 基线
+ * （fetch 失败降级路径），worktree 复用路径不受影响。
+ */
+export function buildBranchStrategy(
+  branch: string,
+  baseBranch?: string,
+): { type: 'branch'; branch: string; baseBranch?: string } {
+  return baseBranch ? { type: 'branch', branch, baseBranch } : { type: 'branch', branch }
+}
+
 /** 按 lockfile 类型识别包管理器（决定依赖安装策略） */
 function detectPackageManager(projectDir: string): 'pnpm' | 'npm' | 'yarn' | 'none' {
   if (existsSync(join(projectDir, 'pnpm-lock.yaml'))) return 'pnpm'
@@ -159,7 +173,7 @@ export async function runIssueInSandbox(opts: RunIssueOptions): Promise<RunIssue
       mounts: mounts.length > 0 ? mounts : undefined,
     }),
     agent: pi(opts.model),
-    branchStrategy: { type: 'branch', branch: opts.branch },
+    branchStrategy: buildBranchStrategy(opts.branch, opts.baseBranch),
     copyToWorktree: copyToWorktree.length > 0 ? copyToWorktree : undefined,
     hooks,
     promptFile: opts.promptFile,

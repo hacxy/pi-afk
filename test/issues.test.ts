@@ -1,151 +1,83 @@
-import { execFile } from 'node:child_process'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
-import { publishAndMerge } from '../src/issues.js'
+import { fetchOriginMain } from '../src/issues.js'
 
 /**
- * 发布流水线（T8，issue #21）：push → create PR →（可选）squash 合并 + 30s 重试。
- * 测试透过公开 API 走真实代码路径，仅在进程边界（execFile）处打桩脚本化 gh/git 输出。
+ * fetchOriginMain（issue #20）：宿主在沙箱运行前刷新 origin/main，
+ * 让 worktree 从最新远端基线创建。用真实 git 仓库验证：
+ * 本地 main 落后于 origin 时，fetch 后 origin/main 仍能拿到远端最新。
  */
 
-vi.mock('node:child_process', () => {
-  const execFile = vi.fn(
-    (
-      _file: string,
-      _args: string[],
-      _opts: unknown,
-      cb: (err: Error | null, result?: { stdout: string; stderr: string }) => void,
-    ) => {
-      cb(new Error('未脚本化的 execFile 调用'))
-    },
-  )
-  return { execFile }
+let dir: string
+let origin: string
+let work: string
+
+function git(args: string[], cwd: string): void {
+  execFileSync('git', args, { cwd, stdio: 'ignore' })
+}
+
+function revParse(cwd: string, ref: string): string {
+  return execFileSync('git', ['rev-parse', ref], { cwd, encoding: 'utf8' }).trim()
+}
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'afk-fetch-test-'))
+  origin = join(dir, 'origin.git')
+  work = join(dir, 'work')
+  // 裸远端仓库（HEAD 指向 main）
+  git(['init', '--bare', '-q', '-b', 'main', origin], dir)
+  // 种子仓库：首个提交推送到 origin/main
+  const seed = join(dir, 'seed')
+  git(['init', '-q', '-b', 'main', seed], dir)
+  git(['config', 'user.name', 'test'], seed)
+  git(['config', 'user.email', 'test@test'], seed)
+  writeFileSync(join(seed, 'a.txt'), 'a\n')
+  git(['add', '.'], seed)
+  git(['commit', '-q', '-m', 'a'], seed)
+  git(['push', '-q', origin, 'main'], seed)
+  // 工作仓库：clone 自 origin（本地 main 与 origin/main 一致）
+  git(['clone', '-q', origin, work], dir)
 })
 
-const execFileMock = vi.mocked(execFile)
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true })
+})
 
-type ScriptResult = { stdout?: string; stderr?: string } | { error: Error }
+describe('fetchOriginMain', () => {
+  it('本地 main 落后于 origin 时，fetch 后 origin/main 刷新到远端最新（本地 main 不动）', async () => {
+    // 远端推进：advance 仓库在 origin 上新增提交，work 未同步
+    const advance = join(dir, 'advance')
+    git(['clone', '-q', origin, advance], dir)
+    git(['config', 'user.name', 'test'], advance)
+    git(['config', 'user.email', 'test@test'], advance)
+    writeFileSync(join(advance, 'b.txt'), 'b\n')
+    git(['add', '.'], advance)
+    git(['commit', '-q', '-m', 'b'], advance)
+    git(['push', '-q', 'origin', 'main'], advance)
 
-function scriptExec(script: (file: string, args: string[]) => ScriptResult): void {
-  execFileMock.mockImplementation((file, args, _opts, cb) => {
-    const result = script(file, args)
-    if ('error' in result) {
-      cb(result.error)
-    } else {
-      cb(null, { stdout: result.stdout ?? '', stderr: result.stderr ?? '' })
-    }
-  })
-}
+    // 前置：work 的 origin/main 落后于远端，本地 main 也在旧提交
+    const localBefore = revParse(work, 'main')
+    const remoteHead = revParse(advance, 'main')
+    expect(revParse(work, 'origin/main')).not.toBe(remoteHead)
 
-/** 模拟 gh 失败：stderr 即 gh 原始输出（issues.ts 的 gh 包装会原样拼进错误信息） */
-function ghError(stderr: string): Error & { stderr: string } {
-  return Object.assign(new Error(`gh command failed: ${stderr}`), { stderr })
-}
+    await fetchOriginMain(work)
 
-/** 正常路径脚本：push 成功 → PR 创建返回 42 号 → merge 成功 */
-const happyPath: (file: string, args: string[]) => ScriptResult = (file, args) => {
-  if (file === 'git' && args[0] === 'push') return { stdout: 'ok' }
-  if (file === 'gh' && args[0] === 'pr' && args[1] === 'create') {
-    return { stdout: 'https://github.com/hacxy/pi-afk/pull/42' }
-  }
-  if (file === 'gh' && args[0] === 'pr' && args[1] === 'merge') return { stdout: 'merged' }
-  return { error: new Error(`unexpected call: ${file} ${args.join(' ')}`) }
-}
-
-const baseOpts = {
-  branch: 'agent/issue-21',
-  title: 'fix: issue #21 test',
-  body: 'Closes #21',
-  projectDir: '/tmp/project',
-}
-
-describe('publishAndMerge', () => {
-  beforeEach(() => {
-    execFileMock.mockReset()
-    scriptExec(happyPath)
+    // fetch 只刷新远程跟踪分支，本地 main 不被改动
+    expect(revParse(work, 'origin/main')).toBe(remoteHead)
+    expect(revParse(work, 'main')).toBe(localBefore)
   })
 
-  afterEach(() => {
-    vi.useRealTimers()
+  it('origin/main 已最新时 fetch 幂等成功', async () => {
+    await expect(fetchOriginMain(work)).resolves.toBeUndefined()
+    expect(revParse(work, 'origin/main')).toBe(revParse(work, 'main'))
   })
 
-  it('autoMerge 关闭：只推送 + 建 PR，不触发合并', async () => {
-    const result = await publishAndMerge({ ...baseOpts, autoMerge: false })
-
-    expect(result.merged).toBe(false)
-    expect(result.pr.number).toBe(42)
-    expect(result.pr.url).toBe('https://github.com/hacxy/pi-afk/pull/42')
-    const calls = execFileMock.mock.calls.map(([file, args]) => [file, args.join(' ')])
-    expect(calls).toEqual([
-      ['git', 'push -u origin agent/issue-21'],
-      [
-        'gh',
-        'pr create --base main --head agent/issue-21 --title fix: issue #21 test --body Closes #21',
-      ],
-    ])
-  })
-
-  it('autoMerge 开启：push → 建 PR → squash 合并全流程跑通', async () => {
-    const result = await publishAndMerge({ ...baseOpts, autoMerge: true })
-
-    expect(result.merged).toBe(true)
-    const calls = execFileMock.mock.calls.map(([file, args]) => [file, args.join(' ')])
-    expect(calls).toEqual([
-      ['git', 'push -u origin agent/issue-21'],
-      [
-        'gh',
-        'pr create --base main --head agent/issue-21 --title fix: issue #21 test --body Closes #21',
-      ],
-      ['gh', 'pr merge 42 --squash --delete-branch'],
-    ])
-  })
-
-  it('合并失败等 30 秒重试一次，重试成功即完成合并', async () => {
-    vi.useFakeTimers()
-    let mergeCalls = 0
-    scriptExec((file, args) => {
-      if (file === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
-        mergeCalls += 1
-        return mergeCalls === 1 ? { error: ghError('gh: not mergeable yet') } : { stdout: 'merged' }
-      }
-      return happyPath(file, args)
-    })
-
-    const pending = publishAndMerge({ ...baseOpts, autoMerge: true })
-    await vi.advanceTimersByTimeAsync(0)
-    expect(mergeCalls).toBe(1) // 首次合并失败，进入 30 秒等待
-
-    await vi.advanceTimersByTimeAsync(29_999)
-    expect(mergeCalls).toBe(1) // 30 秒未到不重试
-
-    await vi.advanceTimersByTimeAsync(1)
-    await expect(pending).resolves.toMatchObject({ merged: true })
-    expect(mergeCalls).toBe(2) // 30 秒后重试一次成功
-  })
-
-  it('重试仍失败：抛错并保留 gh 原始输出，且重试恰好一次', async () => {
-    let mergeCalls = 0
-    scriptExec((file, args) => {
-      if (file === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
-        mergeCalls += 1
-        return { error: ghError('gh: mergeability check failed: pull request is not mergeable') }
-      }
-      return happyPath(file, args)
-    })
-
-    await expect(
-      publishAndMerge({ ...baseOpts, autoMerge: true, retryDelayMs: 1 }),
-    ).rejects.toThrow('gh pr 失败: gh: mergeability check failed: pull request is not mergeable')
-    expect(mergeCalls).toBe(2)
-  })
-
-  it('git push 失败：错误向上传播，不进入建 PR 阶段', async () => {
-    scriptExec((file, args) => {
-      if (file === 'git' && args[0] === 'push') return { error: new Error('push rejected') }
-      return happyPath(file, args)
-    })
-
-    await expect(publishAndMerge({ ...baseOpts, autoMerge: true })).rejects.toThrow('push rejected')
-    expect(execFileMock.mock.calls.some(([file]) => file === 'gh')).toBe(false)
+  it('远端不可达时抛出错误（调用方据此降级本地 HEAD 基线，不阻断流程）', async () => {
+    git(['remote', 'set-url', 'origin', join(dir, 'missing.git')], work)
+    await expect(fetchOriginMain(work)).rejects.toThrow(/git fetch origin main 失败/)
   })
 })

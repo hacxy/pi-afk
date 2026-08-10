@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it, expect } from 'vitest'
 
-import { hostPnpmVersion, dockerBuildArgs } from '../src/sandbox.js'
+import { hostPnpmVersion, dockerBuildArgs, buildBranchStrategy } from '../src/sandbox.js'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -33,6 +33,23 @@ describe('dockerBuildArgs', () => {
     expect(args).toContain('-f')
     expect(args).toContain('/tmp/Dockerfile')
     expect(args).toContain('/tmp') // 构建上下文目录
+  })
+})
+
+describe('buildBranchStrategy', () => {
+  it('传入 baseBranch 时 branch 策略携带 baseBranch（worktree 从 origin/main 创建）', () => {
+    expect(buildBranchStrategy('agent/issue-20', 'origin/main')).toEqual({
+      type: 'branch',
+      branch: 'agent/issue-20',
+      baseBranch: 'origin/main',
+    })
+  })
+
+  it('未传 baseBranch 时省略该字段（sandcastle 默认 HEAD 基线）', () => {
+    expect(buildBranchStrategy('agent/issue-20')).toEqual({
+      type: 'branch',
+      branch: 'agent/issue-20',
+    })
   })
 })
 
