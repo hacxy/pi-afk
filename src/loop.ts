@@ -4,12 +4,20 @@ import { LOG_DIR, type GlobalConfig } from './config.js'
 import {
   listAfkIssues,
   commentOnIssue,
+  commentOnPullRequest,
   publishAndMerge,
+  listPullRequestsForBranch,
+  decideConvergence,
+  buildAlreadyMergedComment,
+  buildPendingManualMergeComment,
+  buildDirtyPrComment,
+  mergeExistingPullRequest,
   recentRalphCommits,
   fetchOriginMain,
   isHitlIssue,
   VerifyFailedError,
   type Issue,
+  type ExistingPr,
 } from './issues.js'
 import { appendLog } from './log.js'
 import { resolvePromptFile, buildIssuePromptArgs } from './prompts.js'
@@ -32,6 +40,9 @@ export type LoopEvent =
   | { type: 'issue-commented'; issue: Issue; reason: string }
   | { type: 'pull-request'; issue: Issue; url: string; prNumber: number }
   | { type: 'issue-merged'; issue: Issue; prNumber: number }
+  | { type: 'pr-exists-merged'; issue: Issue; prNumber: number }
+  | { type: 'pr-pending-manual-merge'; issue: Issue; prNumber: number }
+  | { type: 'pr-conflict-skip'; issue: Issue; prNumber: number }
   | { type: 'presync-conflict'; issue: Issue; files: string[] }
   | { type: 'verify-failed'; issue: Issue; reason: string }
   | { type: 'no-more-tasks'; hitlPending: number }
@@ -75,6 +86,79 @@ export async function processIssue(issue: Issue, opts: LoopOptions): Promise<Loo
   const branch = `agent/issue-${issue.number}`
 
   try {
+    // 收敛检查（T10）：进沙箱前查分支是否已有 PR——防重做（hacxy.cn #18 事故：merge 后关闭状态
+    // 传播延迟导致 issue 列表仍显示 open；已有 PR/已合并的 issue 直接跳过或补合并闭环，不进沙箱）
+    let existingPrs: ExistingPr[] = []
+    try {
+      existingPrs = await listPullRequestsForBranch(branch, opts.projectDir)
+    } catch (err) {
+      // 查询失败（gh/网络故障）降级：记日志、按无 PR 继续（sandcastle 非致命哲学）
+      appendLog(LOG_DIR, {
+        type: 'convergence-check-failed',
+        issueNumber: issue.number,
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+    const decision = decideConvergence(existingPrs, opts.config.autoMerge ?? false)
+    switch (decision.kind) {
+      case 'skip-merged': {
+        // merged PR 已处理：issue 留言 + 跳过（不启动沙箱）
+        await commentOnIssue(issue.number, buildAlreadyMergedComment(decision.prNumber))
+        events.push({ type: 'pr-exists-merged', issue, prNumber: decision.prNumber })
+        appendLog(LOG_DIR, {
+          type: 'convergence-skip',
+          issueNumber: issue.number,
+          prNumber: decision.prNumber,
+          reason: 'merged',
+        })
+        return events
+      }
+      case 'skip-open-clean': {
+        // open + clean + autoMerge 关：不重做、不自动合，issue 留言待人工合并（保留 review 语义）
+        await commentOnIssue(issue.number, buildPendingManualMergeComment(decision.prNumber))
+        events.push({ type: 'pr-pending-manual-merge', issue, prNumber: decision.prNumber })
+        appendLog(LOG_DIR, {
+          type: 'convergence-skip',
+          issueNumber: issue.number,
+          prNumber: decision.prNumber,
+          reason: 'open-clean',
+        })
+        return events
+      }
+      case 'skip-dirty': {
+        // open + dirty：PR 留言说明冲突并跳过本轮（不重做；冲突化解由 T11/T13 承接）
+        await commentOnPullRequest(
+          decision.prNumber,
+          buildDirtyPrComment(decision.prNumber),
+          opts.projectDir,
+        )
+        events.push({ type: 'pr-conflict-skip', issue, prNumber: decision.prNumber })
+        appendLog(LOG_DIR, {
+          type: 'convergence-skip',
+          issueNumber: issue.number,
+          prNumber: decision.prNumber,
+          reason: 'dirty',
+        })
+        return events
+      }
+      case 'merge-existing': {
+        // open + clean + autoMerge 开：直接合并现有 PR 完成闭环（如 merge 失败的残留 PR，
+        // 下次 run 自动补合并）；PR body 的 Closes #N 随之关闭 issue
+        await mergeExistingPullRequest({ prNumber: decision.prNumber, projectDir: opts.projectDir })
+        events.push({ type: 'issue-merged', issue, prNumber: decision.prNumber })
+        appendLog(LOG_DIR, {
+          type: 'issue-result',
+          issueNumber: issue.number,
+          status: 'merged-existing-pr',
+          summary: `PR #${decision.prNumber} 已合并`,
+          commits: 0,
+        })
+        return events
+      }
+      case 'proceed':
+        break
+    }
+
     const recentCommits = await recentRalphCommits(opts.projectDir)
     const promptArgs = buildIssuePromptArgs({ issue, branch, recentCommits })
 
@@ -237,14 +321,12 @@ export async function runAfkLoop(opts: LoopOptions): Promise<LoopEvent[]> {
     const issueEvents = await processIssue(issue, opts)
     events.push(...issueEvents)
 
-    // blocked/skipped 的 issue 本轮不再尝试；验证失败（verify-failed）同样本轮停止
-    const terminal = issueEvents.find(
-      (e): e is Extract<LoopEvent, { type: 'issue-outcome' }> => e.type === 'issue-outcome',
-    )
-    const verifyFailed = issueEvents.some((e) => e.type === 'verify-failed')
-    // 预同步冲突：PR 已建 + 已留言，待人工处理——本轮不再重复派发（不阻塞循环处理下一个 issue）
-    const presyncConflict = issueEvents.some((e) => e.type === 'presync-conflict')
-    if (verifyFailed || presyncConflict || (terminal && terminal.status !== 'done')) {
+    // 循环内去重（T10）：处理过的 issue（done/blocked/skipped/验证失败/预同步冲突/收敛跳过）
+    // 一律进跳过集合，同一 run 内不再重复 pick——防 GitHub 状态传播延迟（merge 后列表仍显示
+    // open）导致重复处理（hacxy.cn #18 事故根因）。
+    // 仅 error（gh/git 网络抖动等未完成处理）保留重试语义：下一迭代重试，且重试时收敛检查
+    // 会先兜底（若已有 PR 则合并/跳过，不重跑沙箱）。
+    if (!issueEvents.some((e) => e.type === 'error')) {
       skipped.add(issue.number)
     }
   }

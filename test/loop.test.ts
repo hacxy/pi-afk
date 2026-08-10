@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
-import { DEFAULT_GLOBAL_CONFIG } from '../src/config.js'
+import { DEFAULT_GLOBAL_CONFIG, type GlobalConfig } from '../src/config.js'
 import { isHitlIssue } from '../src/issues.js'
 import { pickIssue, processIssue, runAfkLoop, type LoopOptions } from '../src/loop.js'
 import { runIssueInSandbox } from '../src/sandbox.js'
@@ -73,11 +73,11 @@ const happyPath: (file: string, args: string[]) => ScriptResult = (file, args) =
 
 const issue22: Issue = { number: 22, title: 'issue 22', body: 'body', comments: [] }
 
-function makeOpts(verifyCommand?: string, iterations = 2): LoopOptions {
+function makeOpts(overrides: Partial<GlobalConfig> = {}, iterations = 2): LoopOptions {
   return {
     projectDir: dir,
     iterations,
-    config: { ...DEFAULT_GLOBAL_CONFIG, verifyCommand },
+    config: { ...DEFAULT_GLOBAL_CONFIG, ...overrides },
     deepseekKey: 'test-key',
   }
 }
@@ -109,7 +109,7 @@ describe('processIssue 验证门（issue #22）', () => {
       return happyPath(file, args)
     })
 
-    const events = await processIssue(issue22, makeOpts('pnpm typecheck'))
+    const events = await processIssue(issue22, makeOpts({ verifyCommand: 'pnpm typecheck' }))
 
     expect(events.some((e) => e.type === 'verify-failed')).toBe(true)
     expect(events.some((e) => e.type === 'pull-request')).toBe(false)
@@ -126,7 +126,7 @@ describe('processIssue 验证门（issue #22）', () => {
       return happyPath(file, args)
     })
 
-    const events = await processIssue(issue22, makeOpts('pnpm typecheck'))
+    const events = await processIssue(issue22, makeOpts({ verifyCommand: 'pnpm typecheck' }))
 
     expect(events.some((e) => e.type === 'verify-failed')).toBe(false)
     expect(events.find((e) => e.type === 'pull-request')).toMatchObject({ prNumber: 42 })
@@ -193,7 +193,7 @@ describe('runAfkLoop 验证失败本轮停止（issue #22）', () => {
       return happyPath(file, args)
     })
 
-    const events = await runAfkLoop(makeOpts('pnpm typecheck'))
+    const events = await runAfkLoop(makeOpts({ verifyCommand: 'pnpm typecheck' }))
 
     // 只拾取一次；下一轮不再处理该 issue → no-more-tasks
     expect(events.filter((e) => e.type === 'issue-picked')).toHaveLength(1)
@@ -207,6 +207,127 @@ const makeIssue = (number: number, body = 'body'): Issue => ({
   title: `issue ${number}`,
   body,
   comments: [],
+})
+
+describe('processIssue 收敛检查（issue #24）', () => {
+  /** 脚本化 gh pr list 返回指定 PR 列表 */
+  const withPrList = (prs: unknown[]) => (file: string, args: string[]) => {
+    if (file === 'gh' && args[0] === 'pr' && args[1] === 'list') {
+      return { stdout: JSON.stringify(prs) }
+    }
+    return happyPath(file, args)
+  }
+
+  const issueCommentArgs = () =>
+    execFileMock.mock.calls
+      .filter(([file, args]) => file === 'gh' && args[0] === 'issue' && args[1] === 'comment')
+      .flatMap(([, args]) => args)
+      .join(' ')
+
+  it('merged 场景：issue 留言「已由 PR #N 处理」且不启动沙箱', async () => {
+    scriptExec(withPrList([{ number: 29, state: 'MERGED', mergeable: 'UNKNOWN' }]))
+
+    const events = await processIssue(issue22, makeOpts({ autoMerge: true }))
+
+    expect(vi.mocked(runIssueInSandbox)).not.toHaveBeenCalled()
+    expect(events).toEqual([{ type: 'pr-exists-merged', issue: issue22, prNumber: 29 }])
+    expect(issueCommentArgs()).toMatch(/已由 PR #29 处理.*本轮跳过/s)
+  })
+
+  it('open+clean + autoMerge 关：issue 留言「已有 PR #N 待人工合并」，不合并、不启动沙箱', async () => {
+    scriptExec(withPrList([{ number: 42, state: 'OPEN', mergeable: 'MERGEABLE' }]))
+
+    const events = await processIssue(issue22, makeOpts({ autoMerge: false }))
+
+    expect(vi.mocked(runIssueInSandbox)).not.toHaveBeenCalled()
+    expect(events).toEqual([{ type: 'pr-pending-manual-merge', issue: issue22, prNumber: 42 }])
+    expect(issueCommentArgs()).toMatch(/已有 PR #42 待人工合并/s)
+    // 不自动合并（防「下次 run 悄悄合掉未 review 的 PR」）
+    expect(
+      execFileMock.mock.calls.some(
+        ([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'merge',
+      ),
+    ).toBe(false)
+  })
+
+  it('open+dirty 场景：PR 留言说明冲突，不启动沙箱', async () => {
+    scriptExec(withPrList([{ number: 42, state: 'OPEN', mergeable: 'CONFLICTING' }]))
+
+    const events = await processIssue(issue22, makeOpts({ autoMerge: true }))
+
+    expect(vi.mocked(runIssueInSandbox)).not.toHaveBeenCalled()
+    expect(events).toEqual([{ type: 'pr-conflict-skip', issue: issue22, prNumber: 42 }])
+    const prComment = execFileMock.mock.calls
+      .filter(([file, args]) => file === 'gh' && args[0] === 'pr' && args[1] === 'comment')
+      .flatMap(([, args]) => args)
+      .join(' ')
+    expect(prComment).toMatch(/冲突/s)
+  })
+
+  it('open+clean + autoMerge 开：直接合并现有 PR（残留合并闭环），不启动沙箱', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'pr' && args[1] === 'merge') return { stdout: 'merged' }
+      return withPrList([{ number: 42, state: 'OPEN', mergeable: 'MERGEABLE' }])(file, args)
+    })
+
+    const events = await processIssue(issue22, makeOpts({ autoMerge: true }))
+
+    expect(vi.mocked(runIssueInSandbox)).not.toHaveBeenCalled()
+    expect(events).toEqual([{ type: 'issue-merged', issue: issue22, prNumber: 42 }])
+    expect(
+      execFileMock.mock.calls.some(
+        ([file, args]) =>
+          file === 'gh' && args.join(' ') === 'pr merge 42 --squash --delete-branch',
+      ),
+    ).toBe(true)
+  })
+
+  it('无 PR：proceed，正常进沙箱（行为不变）', async () => {
+    scriptExec(withPrList([]))
+
+    const events = await processIssue(issue22, makeOpts())
+
+    expect(vi.mocked(runIssueInSandbox)).toHaveBeenCalledTimes(1)
+    expect(events.some((e) => e.type === 'pull-request')).toBe(true)
+  })
+})
+
+describe('runAfkLoop 循环内去重（issue #24）', () => {
+  it('done 结果后 issue 进跳过集合：列表仍显示 open（关闭状态传播延迟）也不再重复 pick', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
+        // 复现事故场景：merge 后 issue 列表因关闭状态传播延迟仍返回该 issue（stale open）
+        return { stdout: JSON.stringify([issue22]) }
+      }
+      if (file === 'gh' && args[0] === 'pr' && args[1] === 'merge') return { stdout: 'merged' }
+      return happyPath(file, args)
+    })
+
+    const events = await runAfkLoop(makeOpts({ autoMerge: true }))
+
+    // 只拾取一次（done 后进跳过集合，下一迭代不再 pick）→ 第二次迭代无候选 → no-more-tasks
+    expect(events.filter((e) => e.type === 'issue-picked')).toHaveLength(1)
+    expect(events.some((e) => e.type === 'issue-merged')).toBe(true)
+    expect(events.some((e) => e.type === 'no-more-tasks')).toBe(true)
+  })
+
+  it('收敛跳过（merged）后同样进跳过集合：同一 run 内不重复留言', async () => {
+    scriptExec((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'list') {
+        return { stdout: JSON.stringify([issue22]) }
+      }
+      if (file === 'gh' && args[0] === 'pr' && args[1] === 'list') {
+        return { stdout: JSON.stringify([{ number: 29, state: 'MERGED', mergeable: 'UNKNOWN' }]) }
+      }
+      return happyPath(file, args)
+    })
+
+    const events = await runAfkLoop(makeOpts())
+
+    expect(events.filter((e) => e.type === 'pr-exists-merged')).toHaveLength(1)
+    expect(events.filter((e) => e.type === 'issue-picked')).toHaveLength(1)
+    expect(events.some((e) => e.type === 'no-more-tasks')).toBe(true)
+  })
 })
 
 describe('pickIssue', () => {

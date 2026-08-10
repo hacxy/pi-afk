@@ -20,6 +20,25 @@ export interface PullRequest {
   number: number
 }
 
+/** 分支已有 PR（与 gh pr list --json number,state,mergeable 的字段对齐） */
+export interface ExistingPr {
+  number: number
+  state: 'OPEN' | 'MERGED' | 'CLOSED'
+  /** GitHub 可合并性：MERGEABLE 干净 / CONFLICTING 冲突 / UNKNOWN 尚未计算（刚建 PR 或已合并） */
+  mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null
+}
+
+/**
+ * 收敛决策（T10 pick 前检查）：issue 是否已有 PR，决定「跳过 / 合并 / 进沙箱」。
+ * 纯函数：gh 调用与 autoMerge 开关均可注入。
+ */
+export type ConvergenceAction =
+  | { kind: 'proceed' }
+  | { kind: 'skip-merged'; prNumber: number }
+  | { kind: 'merge-existing'; prNumber: number }
+  | { kind: 'skip-open-clean'; prNumber: number }
+  | { kind: 'skip-dirty'; prNumber: number }
+
 export interface PublishAndMergeOptions {
   /** 本地分支名（推送到 origin） */
   branch: string
@@ -101,6 +120,72 @@ export async function commentOnIssue(issueNumber: number, body: string): Promise
   await gh(['issue', 'comment', String(issueNumber), '--body', body])
 }
 
+/**
+ * 收敛检查数据源（T10）：列出分支的所有 PR（含已合并/已关闭）。
+ * gh pr list --head <branch> --state all：按 head 分支名匹配，PR 合并后即使分支被删，
+ * head 分支名元数据仍保留，可查到已合并 PR（hacxy.cn #18 事故：merge 后关闭状态传播延迟
+ * 导致 issue 列表仍显示 open，这里用 PR 状态兜底判断是否已处理过）。
+ */
+export async function listPullRequestsForBranch(
+  branch: string,
+  projectDir: string,
+): Promise<ExistingPr[]> {
+  const out = await gh(
+    ['pr', 'list', '--head', branch, '--state', 'all', '--json', 'number,state,mergeable'],
+    projectDir,
+  )
+  return JSON.parse(out) as ExistingPr[]
+}
+
+/**
+ * 收敛决策（纯函数，可单测）：根据分支已有 PR 与 autoMerge 开关决定本轮行为。
+ * 优先级：已合并 PR > open PR（clean/dirty 按 mergeable 区分）> 其余（proceed）。
+ * - merged → 不启动沙箱，issue 留言「已由 PR #N 处理，本轮跳过」
+ * - open + clean（mergeable !== CONFLICTING）+ autoMerge 开 → 直接合并现有 PR（残留合并闭环）
+ * - open + clean + autoMerge 关 → 不启动沙箱，issue 留言「已有 PR #N 待人工合并」
+ * - open + dirty（mergeable === CONFLICTING）→ 不启动沙箱，PR 留言冲突说明
+ * mergeable 为 UNKNOWN（GitHub 尚未计算，如刚建 PR）按 clean 处理，交给合并重试兜底。
+ */
+export function decideConvergence(prs: ExistingPr[], autoMerge: boolean): ConvergenceAction {
+  const merged = prs.filter((p) => p.state === 'MERGED').sort((a, b) => a.number - b.number)[0]
+  if (merged) {
+    return { kind: 'skip-merged', prNumber: merged.number }
+  }
+  const open = prs.filter((p) => p.state === 'OPEN').sort((a, b) => a.number - b.number)[0]
+  if (open) {
+    if (open.mergeable === 'CONFLICTING') {
+      return { kind: 'skip-dirty', prNumber: open.number }
+    }
+    return autoMerge
+      ? { kind: 'merge-existing', prNumber: open.number }
+      : { kind: 'skip-open-clean', prNumber: open.number }
+  }
+  return { kind: 'proceed' }
+}
+
+/** 收敛检查 merged：issue 留言「已由 PR #N 处理，本轮跳过」 */
+export function buildAlreadyMergedComment(prNumber: number): string {
+  return `已由 PR #${prNumber} 处理，本轮跳过。`
+}
+
+/** 收敛检查 open+clean + autoMerge 关：issue 留言「已有 PR #N 待人工合并」（不重做、不自动合） */
+export function buildPendingManualMergeComment(prNumber: number): string {
+  return `检测到已有 PR #${prNumber} 待人工合并。Ralph 本轮跳过：不重做、不自动合并，请人工 review 后合并。`
+}
+
+/** 收敛检查 open+dirty：PR 留言说明冲突并跳过本轮（冲突化解由 T11/T13 承接） */
+export function buildDirtyPrComment(prNumber: number): string {
+  return [
+    `### ⚠️ 本 PR（#${prNumber}）存在合并冲突，Ralph 已跳过本轮处理`,
+    '',
+    '检测到本 PR 与目标分支存在冲突，无法自动合并。Ralph 未重做此 issue，等待人工解决冲突。',
+    '',
+    '**建议下一步：**',
+    '1. 在本地合并最新 main 并解决冲突后推送到本分支',
+    '2. 解决冲突后合并本 PR（或关闭 PR 重新派发该 issue）',
+  ].join('\n')
+}
+
 /** 推送本地分支到 origin（在项目目录执行） */
 export async function pushBranch(branch: string, projectDir: string): Promise<void> {
   const { stdout, stderr } = await execFileAsync('git', ['push', '-u', 'origin', branch], {
@@ -124,6 +209,18 @@ export async function mergePullRequest(opts: {
   projectDir: string
 }): Promise<void> {
   await gh(['pr', 'merge', String(opts.prNumber), '--squash', '--delete-branch'], opts.projectDir)
+}
+
+/**
+ * 合并分支已有 PR（收敛检查：open+clean + autoMerge 开）——复用发布流水线的合并 + 30s 重试语义（T8）。
+ * 用于「merge 失败的残留 PR，下次 run 自动补合并」场景。
+ */
+export async function mergeExistingPullRequest(opts: {
+  prNumber: number
+  projectDir: string
+  retryDelayMs?: number
+}): Promise<void> {
+  await mergeWithRetry(opts)
 }
 
 /**
