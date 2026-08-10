@@ -295,7 +295,10 @@ PRD issue → skill 拆成垂直切片（按依赖顺序创建）
 
 - **pnpm 版本**：构建镜像时自动注入宿主 `pnpm --version`（`ARG PNPM_VERSION` build-arg），沙箱内 pnpm 永远与宿主一致，不硬编码版本。
 - **UID/GID**：构建时注入宿主 `id -u` / `id -g`（sandcastle 预检要求）。
+- **Playwright/Chromium 预装**：镜像内置 chromium 系统依赖与浏览器二进制（`PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`）。精简 Debian 沙箱缺浏览器系统库且 agent 无 root 无法现装（hacxy.cn #24 事故：现场下载 .deb + LD_LIBRARY_PATH 硬凑、软件渲染极慢）；预装后 e2e 开箱即可跑。项目 playwright 版本与预装（1.62.x）不同时，agent 只需 `npx playwright install` 增量下载二进制（系统库已就绪）。
 - 宿主未安装 pnpm 时构建会明确报错（宁可失败也不静默漂移）。
+
+> 修改 Dockerfile 后镜像不会自动重建（`afk <N>` 仅在镜像不存在时构建）。让新镜像生效：`docker rmi pi-afk:latest`（或手动 `afk init` 前先删旧镜像）；已运行中的 run 不受影响（容器沿用旧镜像）。
 
 ---
 

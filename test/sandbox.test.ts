@@ -61,3 +61,20 @@ describe('Dockerfile pnpm 版本注入', () => {
     expect(dockerfile).not.toMatch(/pnpm@\d+\.\d+\.\d+/)
   })
 })
+
+describe('Dockerfile Playwright/Chromium 预装', () => {
+  it('预装 chromium 系统依赖与浏览器二进制（精简 Debian 缺库，agent 无 root 无法现装）', () => {
+    const dockerfile = readFileSync(join(repoRoot, 'Dockerfile'), 'utf8')
+    // 系统依赖：playwright 官方 install-deps（不手写硬编码 apt 列表）
+    expect(dockerfile).toMatch(/install-deps\s+chromium/)
+    // 浏览器二进制：预下载到共享目录，agent 可写以便增量补齐
+    expect(dockerfile).toMatch(/install\s+chromium/)
+    expect(dockerfile).toContain('PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright')
+    expect(dockerfile).toContain('chown -R ${AGENT_UID}:${AGENT_GID} /opt/ms-playwright')
+    // AGENT_UID/GID 必须声明在浏览器预装之前（chown 需对齐最终 UID）
+    const uidLine = dockerfile.indexOf('ARG AGENT_UID')
+    const playwrightLine = dockerfile.indexOf('install-deps')
+    expect(uidLine).toBeGreaterThan(-1)
+    expect(playwrightLine).toBeGreaterThan(uidLine)
+  })
+})
