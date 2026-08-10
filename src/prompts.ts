@@ -48,34 +48,47 @@ export function ensureProjectPrompt(projectDir: string): string {
 }
 
 /**
- * .gitignore 规则：忽略 sandcastle 运行时产物（worktrees/logs/patches/.env），
- * 但保留 .sandcastle/prompt.md 可提交（团队共享模板）。
+ * .gitignore 规则：sandcastle 官方约定只忽略运行时产物（.env / logs/ / worktrees/），
+ * 模板文件 .sandcastle/prompt.md 不在忽略范围，可提交 git 团队共享。
+ * （sandcastle init 生成的 .sandcastle/.gitignore 内容即 .env / logs/ / worktrees/，
+ *  平移到项目根 .gitignore 即带 .sandcastle/ 前缀的这三条）
  */
-const SANDBOX_GITIGNORE_BLOCK = [
-  '# pi-afk 运行时工作区（.sandcastle/prompt.md 除外，可提交共享）',
-  '.sandcastle/*',
-  '!.sandcastle/prompt.md',
+const SANDBOX_GITIGNORE_ENTRIES = [
+  '# pi-afk: sandcastle 运行时产物（.sandcastle/prompt.md 模板可提交）',
+  '.sandcastle/.env',
+  '.sandcastle/logs/',
+  '.sandcastle/worktrees/',
   '',
 ].join('\n')
 
+/** 旧版 pi-afk 管理的忽略规则（整目录或近似方案，需迁移为官方三条） */
+const LEGACY_PI_AFK_GITIGNORE_PATTERNS = [
+  /^\s*\.sandcastle\/\s*$/gm, // 最初版：整目录忽略
+  /^\s*\.sandcastle\/\*\s*$/gm, // #8 版：忽略全部
+  /^\s*!\s*\.sandcastle\/prompt\.md\s*$/gm, // #8 版：放行 prompt.md
+  /^\s*#\s*pi-afk\s*运行时工作区.*$/gm, // #8 版注释
+]
+
 /**
- * 确保项目 .gitignore 忽略 sandcastle 运行时产物但保留 prompt.md（幂等）。
- * 旧版整目录忽略（`.sandcastle/`）会自动升级，否则 prompt.md 永远无法提交。
+ * 确保项目 .gitignore 按 sandcastle 官方标准忽略运行时产物（幂等）。
+ * 旧版规则（`.sandcastle/` 整目录、`.sandcastle/*` + `!.sandcastle/prompt.md`）自动迁移。
  */
 export function ensureSandcastleGitignore(projectDir: string): void {
   const gitignore = join(projectDir, '.gitignore')
   let content = ''
   if (existsSync(gitignore)) {
     content = readFileSync(gitignore, 'utf8')
-    // 已就绪：已有保留 prompt.md 的规则
-    if (content.includes('!.sandcastle/prompt.md')) return
-    // 升级旧版整目录忽略行（`.sandcastle/`）
-    content = content.replace(/^\s*\.sandcastle\/\s*$/gm, '')
+    // 幂等：已有官方三条（worktrees/ 最具代表性）则视为已就绪
+    if (content.includes('.sandcastle/worktrees/')) return
+    // 迁移旧版 pi-afk 规则
+    for (const re of LEGACY_PI_AFK_GITIGNORE_PATTERNS) {
+      content = content.replace(re, '')
+    }
   }
   const trimmed = content.replace(/[\s\uFEFF]*$/, '')
   writeFileSync(
     gitignore,
-    trimmed ? `${trimmed}\n${SANDBOX_GITIGNORE_BLOCK}` : SANDBOX_GITIGNORE_BLOCK,
+    trimmed ? `${trimmed}\n${SANDBOX_GITIGNORE_ENTRIES}` : SANDBOX_GITIGNORE_ENTRIES,
     'utf8',
   )
 }
