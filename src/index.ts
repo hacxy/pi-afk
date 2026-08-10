@@ -17,9 +17,10 @@ export {
   commentOnIssue,
   pushBranch,
   createPullRequest,
+  publishAndMerge,
   recentRalphCommits,
 } from './issues.js'
-export type { Issue, PullRequest } from './issues.js'
+export type { Issue, PullRequest, PublishAndMergeOptions, PublishAndMergeResult } from './issues.js'
 
 // 沙箱执行
 export { runIssueInSandbox, outcomeSchema } from './sandbox.js'

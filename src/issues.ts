@@ -16,6 +16,31 @@ export interface PullRequest {
   number: number
 }
 
+export interface PublishAndMergeOptions {
+  /** 本地分支名（推送到 origin） */
+  branch: string
+  /** PR 标题 */
+  title: string
+  /** PR body（含 Closes #N 时，合并后 GitHub 自动关 issue） */
+  body: string
+  /** 宿主项目目录（cwd） */
+  projectDir: string
+  /** 是否自动 squash 合并（AFK 切片语义） */
+  autoMerge?: boolean
+  /** 合并失败后的重试等待（毫秒，默认 30_000） */
+  retryDelayMs?: number
+}
+
+export interface PublishAndMergeResult {
+  pr: PullRequest
+  merged: boolean
+}
+
+/** 等待（用全局 setTimeout，便于测试注入假定时器） */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function gh(args: string[], cwd?: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync('gh', args, {
@@ -75,6 +100,48 @@ export async function mergePullRequest(opts: {
   projectDir: string
 }): Promise<void> {
   await gh(['pr', 'merge', String(opts.prNumber), '--squash', '--delete-branch'], opts.projectDir)
+}
+
+/**
+ * 发布流水线（T8）：推送分支 → 创建 PR →（可选）squash 合并。
+ * 合并失败先等 retryDelayMs（默认 30 秒）重试一次；重试成功即完成，仍失败则抛出
+ * 保留 gh 原始输出的错误。后续合并行为（预同步/验证门/冲突兜底）都插在这唯一的出口。
+ */
+export async function publishAndMerge(
+  opts: PublishAndMergeOptions,
+): Promise<PublishAndMergeResult> {
+  await pushBranch(opts.branch, opts.projectDir)
+  const pr = await createPullRequest({
+    branch: opts.branch,
+    title: opts.title,
+    body: opts.body,
+    projectDir: opts.projectDir,
+  })
+  if (!opts.autoMerge) {
+    return { pr, merged: false }
+  }
+  await mergeWithRetry({
+    prNumber: pr.number,
+    projectDir: opts.projectDir,
+    retryDelayMs: opts.retryDelayMs,
+  })
+  return { pr, merged: true }
+}
+
+/** 合并 + 重试：失败等 30 秒重试一次；重试仍失败抛错（保留 gh 原始输出） */
+async function mergeWithRetry(opts: {
+  prNumber: number
+  projectDir: string
+  retryDelayMs?: number
+}): Promise<void> {
+  const delay = opts.retryDelayMs ?? 30_000
+  try {
+    await mergePullRequest({ prNumber: opts.prNumber, projectDir: opts.projectDir })
+  } catch {
+    // 首次合并失败常见于 PR 刚创建、GitHub 尚未算好可合并性——等 30 秒重试一次
+    await sleep(delay)
+    await mergePullRequest({ prNumber: opts.prNumber, projectDir: opts.projectDir })
+  }
 }
 
 /** 用 PR body 里的 "Closes #N" 实现合并时自动关 issue */
