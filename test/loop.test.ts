@@ -23,7 +23,7 @@ vi.mock('../src/issues.js', () => ({
   removeLabel: vi.fn(),
   repoName: vi.fn(),
 }))
-vi.mock('../src/log.js', () => ({ currentLogFile: vi.fn(), log: vi.fn(), logError: vi.fn() }))
+vi.mock('../src/log.js', () => ({ beginIssueLog: vi.fn(), log: vi.fn(), logError: vi.fn() }))
 
 import { HostExecutor } from '../src/executor.js'
 import {
@@ -43,7 +43,7 @@ import {
   removeLabel,
   repoName,
 } from '../src/issues.js'
-import { currentLogFile } from '../src/log.js'
+import { beginIssueLog } from '../src/log.js'
 
 const issue: Issue = {
   number: 52,
@@ -77,7 +77,11 @@ beforeEach(() => {
   vi.mocked(createWorktree).mockReturnValue('/tmp/wt')
   vi.mocked(repoName).mockReturnValue('hacxy/pi-afk')
   vi.mocked(archiveWorktree).mockReturnValue('.pi/afk/failed/afk/issue-52')
-  vi.mocked(currentLogFile).mockReturnValue(resolve('.pi/afk/logs/afk-test.log'))
+  vi.mocked(beginIssueLog).mockImplementation((n) => ({
+    log: vi.fn(),
+    logError: vi.fn(),
+    file: resolve(`.pi/afk/logs/issue-${n}.log`),
+  }))
   vi.mocked(openPr).mockReturnValue('https://github.com/hacxy/pi-afk/pull/100')
   vi.mocked(installDeps).mockResolvedValue(undefined)
   vi.mocked(HostExecutor).mockImplementation(() => {
@@ -94,7 +98,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
 
     // 宿主侧装依赖（编排层负责，agent 不自装），在 worktree 里执行
     expect(installDeps).toHaveBeenCalledTimes(1)
-    expect(installDeps).toHaveBeenCalledWith('/tmp/wt')
+    expect(installDeps).toHaveBeenCalledWith('/tmp/wt', expect.any(Function)) // 注入 issue 级日志器
 
     // 单阶段：只有 implementer，且 cwd=worktree（pi 在 worktree 里读写文件）
     const executor = executors[0]
@@ -162,7 +166,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     expect(body).toContain('implementer')
     expect(body).toContain('退出码：1')
     expect(body).toContain('typecheck 失败')
-    expect(body).toContain('.pi/afk/logs/afk-test.log') // 日志（已相对化）
+    expect(body).toContain('.pi/afk/logs/issue-52.log') // 日志（已相对化，issue 级）
     expect(body).toContain('.pi/afk/failed/afk/issue-52') // 归档路径
     expect(body).toContain('agent:todo') // 重跑提示
 
@@ -193,7 +197,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     )
     vi.mocked(createWorktree).mockImplementation((branch) => `/tmp/wt-${branch.split('-')[2]}`)
 
-    const results = await runAfk()
+    const results = await runAfk(1)
     expect(results).toHaveLength(2)
     expect(results.every((r) => r.status === 'done')).toBe(true)
 
@@ -202,5 +206,65 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     expect(executors).toHaveLength(2)
     const stages = executors.flatMap((e) => vi.mocked(e.runStage).mock.calls.map(([c]) => c.stage))
     expect(stages).toEqual(['implementer', 'implementer'])
+  })
+
+  it('maxIterations 默认 1：一次迭代 = 并发处理至多 maxParallel 个 issue', async () => {
+    const issue2: Issue = { ...issue, number: 53, title: '另一件事' }
+    vi.mocked(listTodoIssues).mockReturnValue([issue, issue2])
+    vi.mocked(branchName).mockImplementation((i) =>
+      i.number === 52 ? 'afk/issue-52' : 'afk/issue-53',
+    )
+
+    const results = await runAfk()
+
+    expect(results).toHaveLength(2) // 一次迭代 = 整批并发（maxParallel=2）
+    expect(results.every((r) => r.status === 'done')).toBe(true)
+    expect(listTodoIssues).toHaveBeenCalledTimes(1)
+    expect(openPr).toHaveBeenCalledTimes(2)
+    expect(executors).toHaveLength(2)
+  })
+
+  it('maxIterations=3、maxParallel=2：三次迭代，每批至多 2 个，批间重拉', async () => {
+    const issues = [
+      { ...issue, number: 52, title: '甲' },
+      { ...issue, number: 53, title: '乙' },
+      { ...issue, number: 54, title: '丙' },
+    ]
+    vi.mocked(listTodoIssues)
+      .mockReturnValueOnce(issues)
+      .mockReturnValueOnce(issues)
+      .mockReturnValue([]) // 第三批已无待办（label 翻转后）
+    vi.mocked(branchName).mockImplementation((i) => `afk/issue-${i.number}`)
+
+    const results = await runAfk(3)
+
+    expect(results).toHaveLength(3)
+    expect(results.every((r) => r.status === 'done')).toBe(true)
+    expect(listTodoIssues).toHaveBeenCalledTimes(3) // 每迭代重拉
+    expect(openPr).toHaveBeenCalledTimes(3)
+    expect(executors).toHaveLength(3)
+  })
+
+  it('批间重拉：第二批感知 label 翻转，不再选已处理的 issue', async () => {
+    const issue2: Issue = { ...issue, number: 53, title: '另一件事' }
+    vi.mocked(listTodoIssues).mockReturnValueOnce([issue]).mockReturnValueOnce([issue2])
+    vi.mocked(branchName).mockImplementation((i) =>
+      i.number === 52 ? 'afk/issue-52' : 'afk/issue-53',
+    )
+
+    const results = await runAfk(2)
+
+    expect(results.map((r) => r.issue.number)).toEqual([52, 53])
+    expect(listTodoIssues).toHaveBeenCalledTimes(2)
+  })
+
+  it('label 翻转失败兜底：seen 防同批重选死循环，提前结束', async () => {
+    vi.mocked(listTodoIssues).mockReturnValue([issue]) // 永远返回同一个（label 没翻转）
+
+    const results = await runAfk(5)
+
+    expect(results).toHaveLength(1)
+    expect(listTodoIssues).toHaveBeenCalledTimes(2) // 第二次拉到 seen 内 → 终止
+    expect(openPr).toHaveBeenCalledTimes(1)
   })
 })

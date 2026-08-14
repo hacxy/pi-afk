@@ -44,6 +44,26 @@ describe('runAfkLoop（默认命令 action）', () => {
     expect(logError).toHaveBeenCalledWith(expect.stringContaining('implementer 退出码 1'))
     expect(process.exitCode).toBe(1)
   })
+
+  it('maxIterations 透传：runAfkLoop(3) → runAfk(3)', async () => {
+    vi.mocked(runAfk).mockResolvedValue([])
+    await runAfkLoop(3)
+    expect(runAfk).toHaveBeenCalledWith(3)
+  })
+
+  it('位置参数 clamp：0/负数/非数字/空串/缺省均按 1', async () => {
+    vi.mocked(runAfk).mockResolvedValue([])
+    await runAfkLoop('0')
+    expect(runAfk).toHaveBeenCalledWith(1)
+    await runAfkLoop('-3')
+    expect(runAfk).toHaveBeenCalledWith(1)
+    await runAfkLoop('abc')
+    expect(runAfk).toHaveBeenCalledWith(1)
+    await runAfkLoop('')
+    expect(runAfk).toHaveBeenCalledWith(1)
+    await runAfkLoop()
+    expect(runAfk).toHaveBeenCalledWith(1)
+  })
 })
 
 describe('cac CLI 冒烟', () => {

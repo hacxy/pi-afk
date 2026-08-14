@@ -235,6 +235,8 @@ export interface StageResult {
   timedOut: boolean
   /** 会话 JSONL 落盘路径 */
   sessionFile: string
+  /** 阶段耗时（ms，关键信息日志用） */
+  durationMs: number
 }
 
 export interface ExecutorHooks {
@@ -280,6 +282,8 @@ export function runJsonlStage(
   let timedOut = false
   let settled = false
 
+  const startedAt = Date.now()
+
   return new Promise((resolvePromise) => {
     const child = opts.spawnFn(opts.command, opts.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -298,6 +302,7 @@ export function runJsonlStage(
         stderr,
         timedOut,
         sessionFile: recorder.path,
+        durationMs: Date.now() - startedAt,
       })
     }
 

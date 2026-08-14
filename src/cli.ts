@@ -11,10 +11,13 @@ const VERSION: string = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
 ).version as string
 
-/** 无人值守循环（默认命令 action）：拉 issue → 逐个 worktree 完整流程 → 汇总 */
-export async function runAfkLoop(): Promise<void> {
-  log('afk 启动：无人值守循环（本地 worktree 完整流程）')
-  const results = await runAfk()
+/** 无人值守循环（默认命令 action）：拉 issue → 分批并发完整流程 → 汇总 */
+export async function runAfkLoop(maxIterations?: string | number): Promise<void> {
+  // 位置参数解析：默认 1，clamp ≥ 1（0/负数/非数字均按 1）
+  const n = maxIterations === undefined || maxIterations === '' ? 1 : Number(maxIterations)
+  const limit = Number.isFinite(n) ? Math.max(1, Math.floor(n)) : 1
+  log(`afk 启动：无人值守循环（本地 worktree 完整流程，最大迭代 ${limit}）`)
+  const results = await runAfk(limit)
 
   const done = results.filter((r) => r.status === 'done')
   const failed = results.filter((r) => r.status === 'failed')
@@ -32,10 +35,13 @@ function main(): void {
   const cli = cac('afk')
 
   cli
-    .command('', '无人值守循环：拉 agent:todo issue → 宿主单阶段 implementer → push → 开 PR')
-    .action(async () => {
+    .command(
+      '[maxIterations]',
+      '无人值守循环：拉 agent:todo issue → 宿主单阶段 implementer → push → 开 PR（迭代 maxIterations 次，每次并发处理至多 maxParallel 个，默认 1）',
+    )
+    .action(async (maxIterations?: string) => {
       try {
-        await runAfkLoop()
+        await runAfkLoop(maxIterations)
       } catch (error) {
         logError(`afk 崩溃：${error instanceof Error ? (error.stack ?? error.message) : error}`)
         process.exitCode = 1

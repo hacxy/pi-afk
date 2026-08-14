@@ -26,11 +26,14 @@ interface ExecaError {
 /**
  * 宿主侧依赖安装（编排层负责，agent 不自装）：
  * worktree 建好后、implementer 前，在 worktree 里跑一次 install。
- * CI=true 保证无 TTY 下 pnpm 等不会交互性 abort。
+ * CI=true 保证无 TTY 下 pnpm 等不会交互性 abort。logFn 由调用方注入（issue 级日志器）。
  */
-export async function installDeps(worktree: string): Promise<void> {
+export async function installDeps(
+  worktree: string,
+  logFn: (msg: string) => void = log,
+): Promise<void> {
   const cmd = config.installCmd ?? installCommand(worktree)
-  log(`依赖安装：${cmd}（worktree）`)
+  logFn(`依赖安装：${cmd}（worktree）`)
   const parts = cmd.trim().split(/\s+/)
   const bin = parts[0]
   if (!bin) throw new Error('依赖安装命令为空（AFK_INSTALL_CMD 未配置或为空）')

@@ -297,6 +297,7 @@ describe('HostExecutor 宿主后端（假 spawn）', () => {
     expect(result.sessionId).toBe('s1')
     expect(result.stdout).toBe('你好世界')
     expect(result.timedOut).toBe(false)
+    expect(result.durationMs).toBeGreaterThanOrEqual(0)
     expect(onText).toHaveBeenCalledWith('你好')
     expect(onText).toHaveBeenCalledWith('世界')
     expect(onEvent).toHaveBeenCalled()
