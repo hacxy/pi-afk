@@ -30,6 +30,9 @@ docker build -t pi-workspace --build-arg AGENT_UID=$(id -u) --build-arg AGENT_GI
 # 2. 在目标项目目录运行（afk 在 cwd 解析 GitHub repo）
 cd /path/to/target-repo
 afk
+
+# 3. 即席命令：宿主本地单会话 pi（实时透传 + 落盘 .afk/sessions/）
+afk run "修复登录页 bug"
 ```
 
 ## label 状态机
@@ -42,16 +45,19 @@ afk
 
 ## 配置（环境变量）
 
-| 变量                                                     | 默认                                         | 说明             |
-| -------------------------------------------------------- | -------------------------------------------- | ---------------- |
-| `AFK_IMAGE`                                              | `pi-workspace`                               | 工作容器镜像     |
-| `AFK_MODEL`                                              | `deepseek/deepseek-v4-flash`                 | implementer 模型 |
-| `AFK_PLANNER_MODEL`                                      | 同 MODEL                                     | planner 模型     |
-| `AFK_REVIEWER_MODEL`                                     | 同 MODEL                                     | reviewer 模型    |
-| `AFK_THINKING`                                           | `medium`                                     | 思考等级         |
-| `AFK_MAX_PARALLEL`                                       | `2`                                          | 并发信号量上限   |
-| `AFK_TODO_LABEL` / `AFK_DONE_LABEL` / `AFK_FAILED_LABEL` | `agent:todo` / `agent:done` / `agent:failed` | label 状态机     |
-| `AFK_BRANCH_PREFIX`                                      | `afk`                                        | 分支前缀         |
+| 变量                                                     | 默认                                         | 说明                                        |
+| -------------------------------------------------------- | -------------------------------------------- | ------------------------------------------- |
+| `AFK_IMAGE`                                              | `pi-workspace`                               | 工作容器镜像                                |
+| `AFK_MODEL`                                              | `deepseek/deepseek-v4-flash`                 | implementer 模型                            |
+| `AFK_PLANNER_MODEL`                                      | 同 MODEL                                     | planner 模型                                |
+| `AFK_REVIEWER_MODEL`                                     | 同 MODEL                                     | reviewer 模型                               |
+| `AFK_THINKING`                                           | `medium`                                     | 思考等级                                    |
+| `AFK_MAX_PARALLEL`                                       | `2`                                          | 并发信号量上限                              |
+| `AFK_TODO_LABEL` / `AFK_DONE_LABEL` / `AFK_FAILED_LABEL` | `agent:todo` / `agent:done` / `agent:failed` | label 状态机                                |
+| `AFK_BRANCH_PREFIX`                                      | `afk`                                        | 分支前缀                                    |
+| `AFK_SESSIONS_DIR`                                       | `.afk/sessions`                              | 会话 JSONL 落盘目录（`--mode json` 事件流） |
+| `AFK_IDLE_TIMEOUT_SEC`                                   | `600`                                        | idle 超时（无事件活动上限，秒）             |
+| `AFK_COMPLETION_TIMEOUT_SEC`                             | `60`                                         | completion 宽限（终态后等进程退出，秒）     |
 
 ## 开发
 
@@ -65,4 +71,5 @@ pnpm build          # 产出 dist/cli.js（bin: afk）
 ## 范围（当前切片）
 
 - ✅ 无人值守循环：planner → implementer → reviewer → push 分支 + 报告
-- ⏸️ merge/关 issue、交互模式（工具路由）、skills —— 后续轮次
+- ✅ `afk run "<prompt>"` 即席命令：宿主本地单会话 pi，实时透传 + 会话 JSONL 落盘 + 双超时
+- ⏸️ 容器后端迁移到共享层（Executor）、merge/关 issue、交互模式（工具路由）、skills —— 后续轮次

@@ -30,4 +30,9 @@ export const config = {
   /** 容器内 git 提交身份（agent commit 时注入） */
   gitAuthor: process.env.AFK_GIT_AUTHOR ?? 'afk',
   gitEmail: process.env.AFK_GIT_EMAIL ?? 'afk@hacxy.cn',
+  /** 会话记录目录：--mode json 事件流落盘 */
+  sessionsDir: process.env.AFK_SESSIONS_DIR ?? '.afk/sessions',
+  /** 双超时（秒）：idle = 无事件活动上限；completion = 终态后等待进程退出宽限 */
+  idleTimeoutSec: Number(process.env.AFK_IDLE_TIMEOUT_SEC ?? 600),
+  completionTimeoutSec: Number(process.env.AFK_COMPLETION_TIMEOUT_SEC ?? 60),
 }
