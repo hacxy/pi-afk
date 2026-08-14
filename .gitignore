@@ -5,10 +5,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# sandcastle runtime artifacts
-.sandcastle/.env
-.sandcastle/logs/
-.sandcastle/worktrees/
+# afk 运行时产物（worktree 快照 / pi-home / 日志）
+.afk/
 
 # misc
 .DS_Store

@@ -1,364 +1,68 @@
 # pi-afk
 
-基于 [sandcastle](https://github.com/mattpocock/sandcastle) + [pi](https://github.com/earendil-works/pi-coding-agent) 的 **AFK（无人值守）循环编排器**。
+基于 pi 的**无人值守循环编排器**——最小版 sandcastle：宿主 ts 程序负责编排（拉 issue、起容器、并发、失败处理），agent 推理交给容器内的 `pi -p`。
 
-你在 GitHub 上创建带 `afk` 标签的 issue，pi-afk 自动完成剩下的：
+> 与 sandcastle 的区别：不依赖 `@ai-hero/sandcastle` 库，只重写它的循环骨架，agent 引擎固定是 pi。
 
-```
-创建 issue → 沙箱内 agent 实现 → 自动提交 → 预同步合并 → 推送分支 → 开 PR → （可选）自动合并 → issue 自动关闭
-```
-
-整个循环无人值守（AFK = away from keyboard），你可以放心离开。**沙箱保守派设计**：凭据、push、PR 全部由宿主机完成，沙箱内的 agent 只接触隔离的工作副本。
-
----
-
-## 目录
-
-- [工作原理](#工作原理)
-- [前置条件](#前置条件)
-- [安装](#安装)
-- [快速开始](#快速开始)
-- [配置](#配置)
-- [提示词模板](#提示词模板)
-- [与 prd-to-issues skill 集成](#与-prd-to-issues-skill-集成)
-- [依赖处理](#依赖处理)
-- [日志与事件](#日志与事件)
-- [安全模型](#安全模型)
-- [故障排查](#故障排查)
-- [开发](#开发)
-
----
-
-## 工作原理
-
-`afk <N>` 会串行处理 N 个开放 issue（parallel-ready 结构，未来可并行）。每个 issue 的完整流程：
+## 架构
 
 ```
-宿主（你的机器）                          沙箱（Docker 容器，零凭据）
-─────────────────────                    ─────────────────────────────
-1. 拉取开放 issue（按配置 labels 过滤；未配置 = 不过滤全部拉取）
-2. 按编号升序取第一个（本 run 已处理过的 issue 已进跳过集合，不再重复 pick）
-3. 收敛检查（T10）：进沙箱前查分支已有 PR
-   （gh pr list --head agent/issue-N --state all）：
-   · merged PR → issue 留言「已由 PR #N 处理，本轮跳过」，不启动沙箱
-   · open + clean + autoMerge 开 → 直接合并现有 PR（残留合并闭环），不启动沙箱
-   · open + clean + autoMerge 关 → issue 留言「已有 PR #N 待人工合并」，不合并不重做
-   · open + dirty → PR 留言说明冲突，本轮跳过
-   · 无 PR → 继续进沙箱
-4. 宿主刷新 origin/main
-   （git fetch origin main；失败时降级本地 HEAD，不阻断）
-5. 创建独立分支 agent/issue-N
-   （git worktree，从最新 origin/main 创建，不影响你的工作区）
-6. 组装 prompt（模板 + issue 内容）
-                                         7. 启动容器（镜像 pi-afk:latest）
-                                         8. 按 lockfile 类型处理依赖
-                                            · pnpm：共享宿主 store 秒级重建
-                                            · npm/yarn：复制 node_modules + 增量安装
-                                         9. 运行 pi agent：
-                                            探索 → 计划 → TDD 实现
-                                            → 验证（typecheck + test）
-                                            → 提交（只提交，不 push）
-                                         10. 输出 <promise>COMPLETE</promise>
-                                            和结构化 <outcome>{status, summary}
-11. 解析 outcome：
-   · done + 有提交 → 预同步 + push 分支 + 创建 PR
-     （PR body 含 "Closes #N"，合并后
-       GitHub 自动关闭 issue）
-     · 预同步（T11）：push 前宿主把最新
-       origin/main 合并进分支（分支 worktree
-       内执行 git merge，宿主操作）：
-        合并干净 → 继续发布
-        合并冲突 → 保留冲突现场，派发第二次
-        沙箱 run（T13 resolve run）自动解冲突：
-        · resolve 成功 → 分支已含 main，
-          走发布流水线 → PR 干净并自动合并
-        · resolve 失败（blocked/skipped/零提交）
-          → 回退兜底：push + 建 PR + PR 留言
-          冲突文件清单与下一步建议（不自动合并）
-     · 配置了 verifyCommand 时 → 预同步后、
-       push 前在分支临时 worktree 执行验证
-       （校验合并后状态）：
-        零退出 → 正常发布
-        非零退出 → 留言说明验证失败、
-        不 push 不发版、该 issue 本轮停止
-   · done + 无提交 → 留言警告，不建 PR
-   · blocked/skipped → issue 留言说明原因，
-     本轮跳过
-   · autoMerge 开启时 → 自动 squash 合并 PR
-     （合并失败等 30 秒重试一次，仍失败报错保留 gh 输出）
-12. 写事件日志（项目 .sandcastle/logs/afk.jsonl）
-13. 进入下一个 issue（处理过的 issue 无论结果都进跳过集合，
-    同一 run 内不再重复 pick——防关闭状态传播延迟导致重复处理）
+afk（宿主 ts 程序，零 pi SDK 依赖）
+  → gh 拉 open issues（label: agent:todo，且不含 done/failed）
+  → 每个 issue：一个 git worktree，三阶段串行，各一个干净容器
+       planner 容器（pi -p → 结构化 JSON plan → zod 校验）
+     → implementer 容器（pi -p → 写代码 + 验证 + commit）
+     → reviewer 容器（pi -p → 审查 + 直接修复 + commit）
+  → 宿主 push 分支 origin/afk/issue-N-slug
+  → label 状态机：agent:todo → agent:done（成功）/ agent:failed（失败）
 ```
 
-### 设计要点（协议）
-
-- **agent 只提交，不 push、不关 issue、不改 label** —— 所有写远端操作由宿主完成，凭据不进沙箱
-- **完成信号**：agent 输出 `<promise>COMPLETE</promise>` 结束一轮；结构化输出 `<outcome>` 是 zod 校验的 JSON（`{ status: 'done'|'blocked'|'skipped', summary }`），校验失败自动重试
-- **进度锚点**：prompt 中注入最近 10 条 `Ralph:` 提交，让 agent 知道之前的进度
-- **依赖顺序**：issue 按编号升序处理 —— 配合按依赖顺序创建 issue 的规范，先被依赖的先实现
-- **合并重试**：autoMerge 合并失败先等 30 秒重试一次（PR 刚创建时 GitHub 尚未算好可合并性），重试仍失败则报错并保留 gh 原始输出
-- **预同步合并（T11）+ resolve run（T13）**：agent 完成后、push 前，宿主把最新 `origin/main` 合并进分支（在分支沙箱 worktree 内执行 `git merge`，宿主操作、不涉沙箱凭据）。合并干净 → 正常发布；合并冲突 → **不再直接停摆**：保留冲突现场（MERGE_HEAD + 未合并路径），派发第二次沙箱 run（resolve run）自动解冲突——复用同一 worktree（sandcastle branch 策略 worktree 复用，bind-mount 直接可见冲突状态，不重建），prompt 注入冲突文件清单、被合并的 main 提交 SHA 与原始 issue 上下文，边界约束写死在模板（**一次机会**：解不了即失败回退；**同一验收门槛**：全量回归绿、沙箱内自证；只允许解决冲突与必要连带修改；禁止新功能/无关重构；必须产生提交，done 但零提交按失败）。resolve 成功 → 分支已含 main，走发布流水线 → PR 干净并自动合并；失败 → 回退 T11 兜底路径（push + 创建 PR + **PR 留言冲突文件清单与下一步建议**，不留无声 dirty PR，hacxy.cn #23 事故教训）、不自动合并、该 issue 本轮结束（不阻塞循环）
-- **验证门（可选）**：配置 `verifyCommand`（如 `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test:run`）后，发布流水线在预同步合并之后、push 之前于分支临时 worktree 执行该命令（干净检出，随用随删，不依赖沙箱 worktree 生命周期），校验的是将要推送的合并后状态，非零退出即停摆——留言说明验证失败、不发版、该 issue 本轮停止；默认不配置 = 信任 agent 声明（行为与现状一致）
-- **不重做（T10）**：两层防护防重复处理（hacxy.cn #18 事故复盘）——① 循环内去重：本 run 处理过的 issue 无论结果（done/blocked/skipped/验证失败/预同步冲突/收敛跳过）一律进跳过集合，同一 run 内不再重复 pick（防 merge 后关闭状态传播延迟导致列表仍显示 open 时被再次派发）；② pick 时收敛检查：进沙箱前 `gh pr list --head agent/issue-N --state all` 查分支已有 PR——merged → issue 留言「已由 PR #N 处理」跳过；open+clean → autoMerge 开时直接合并现有 PR 闭环（merge 失败残留 PR 下次 run 自动补合并）、关时 issue 留言「已有 PR #N 待人工合并」跳过（不重做、不自动合）；open+dirty → PR 留言说明冲突跳过（冲突化解由 T13 resolve run 承接，残留 dirty PR 的 issue 重新派发时自动化解）
-
----
-
-## 前置条件
-
-| 依赖                          | 用途                    | 安装                                                   |
-| ----------------------------- | ----------------------- | ------------------------------------------------------ |
-| Node.js ≥ 20                  | 运行 pi-afk / pi        | [nodejs.org](https://nodejs.org)                       |
-| Docker（macOS 推荐 OrbStack） | 沙箱容器                | [orbstack.dev](https://orbstack.dev)                   |
-| gh CLI + 登录                 | GitHub issue / PR 操作  | `brew install gh && gh auth login`                     |
-| DEEPSEEK_API_KEY              | 沙箱内 agent 的模型凭据 | [platform.deepseek.com](https://platform.deepseek.com) |
-
-> 沙箱内 agent 直接调用 DeepSeek API（`DEEPSEEK_API_KEY` 注入容器环境变量，容器联网即可，无需额外配置）。
-
----
-
-## 安装
-
-> ⚠️ 尚未发布 npm（见[路线图](#开发)），当前从源码安装：
-
-```bash
-git clone https://github.com/hacxy/pi-afk.git
-cd pi-afk && pnpm install && pnpm build
-pnpm link --global        # 提供 afk 命令（开发模式）
-```
-
----
+- **容器隔离**：每个阶段 `docker run --rm` 干净容器，容器内 `pnpm install`（不挂宿主 store，稳优先）
+- **并发**：信号量 `MAX_PARALLEL`（默认 2）
+- **可观测性**：容器内 pi session 落盘 `.afk/pi-home/<branch>/` + 宿主日志 `.afk/logs/afk-*.log`
 
 ## 快速开始
 
 ```bash
-# 1. 设置模型凭据（写入 shell 配置 ~/.zshrc 持久化）
-export DEEPSEEK_API_KEY=sk-xxxxxxxx
+# 1. 构建工作容器镜像
+docker build -t pi-workspace --build-arg AGENT_UID=$(id -u) --build-arg AGENT_GID=$(id -g) .
 
-# 2. 可选：提前初始化（构建沙箱镜像 ~1-2 分钟、生成全局配置）
-afk init
-
-# 3. 在任何项目里直接跑（首次自动完成所有初始化）
-cd 你的项目
-afk 10        # 处理 10 个开放 issue（没有则立即结束）
+# 2. 在目标项目目录运行（afk 在 cwd 解析 GitHub repo）
+cd /path/to/target-repo
+afk
 ```
 
-**首次运行自动做的事**（无需手动 `afk init`）：
+## label 状态机
 
-1. 生成全局配置 `~/.afk/config.json`（跨所有项目共享）
-2. 检查/构建沙箱镜像 `pi-afk:latest`（全局一次，所有项目复用）
-3. 向项目 `.gitignore` 追加 sandcastle 运行时产物忽略规则（幂等，仅 `.sandcastle/.env` / `logs/` / `worktrees/` 三条，`prompt.md` 可提交）
-4. 幂等复制默认模板到项目 `.sandcastle/prompt.md` 与 `.sandcastle/resolve.md`（已存在则跳过）
-5. 检查 DEEPSEEK_API_KEY，缺失则明确报错
+| label          | 谁打   | 含义                                           |
+| -------------- | ------ | ---------------------------------------------- |
+| `agent:todo`   | 你手动 | 交给 agent 处理（入口）                        |
+| `agent:done`   | afk    | 分支已 push、实现完成（终态，issue 保持 open） |
+| `agent:failed` | afk    | 失败（终态，改回 todo 才重跑）                 |
 
-**在项目里创建第一个任务**：
+## 配置（环境变量）
 
-```bash
-gh issue create --title "实现 xxx" --body "请实现 xxx，并添加测试" --label afk
-afk 1
-```
-
-每次 `afk <N>` 启动时会打印一行当前生效的模板路径（`→ 使用模板: <绝对路径>`），随时可见模板来自哪一层。
-
-### 诊断：`afk doctor`
-
-对配置/模板“黑盒”问题的排查入口——一次性显示合并后的生效配置（5 字段）、实际使用的模板绝对路径、沙箱镜像是否存在、gh 是否登录：
-
-```bash
-cd 你的项目 && afk doctor
-```
-
-```
-=== afk doctor ===
-
-配置（生效合并值）:
-  image:     pi-afk:latest
-  model:     deepseek/deepseek-v4-flash
-  labels:    （无——不过滤）
-  autoMerge: off
-  verify:    （无——跳过验证）
-
-模板: /path/to/.sandcastle/prompt.md （项目自定义）
-
-检查项:
-  ✓ 沙箱镜像: 存在
-  ✓ gh 登录: 已登录
-```
-
-`afk doctor` 是**纯只读诊断**：不生成配置、不构建镜像、不复制模板，无任何副作用；无配置文件/无自定义模板的干净环境也能正常输出（显示默认值）。
-
----
-
-## 配置
-
-### 环境变量
-
-| 变量               | 必填 | 说明                                      |
-| ------------------ | ---- | ----------------------------------------- |
-| `DEEPSEEK_API_KEY` | ✅   | DeepSeek API key（注入沙箱供 agent 使用） |
-
-### 全局配置 `~/.afk/config.json`
-
-全局唯一配置源（跨所有项目共享），只保留 5 个用户真正会改的字段：
-
-```jsonc
-{
-  "image": "pi-afk:latest", // 沙箱镜像名
-  "model": "deepseek/deepseek-v4-flash", // 沙箱 agent 模型（pi 的 provider/model 格式）
-  "labels": [], // 拉取 issue 的标签（数组，任一命中即拉取；空数组 = 不过滤全部拉取）
-  "autoMerge": false, // 可选：done 后自动 squash 合并 PR
-  "verifyCommand": "", // 可选：发布（T8）push 前在分支临时 worktree 执行的验证命令（如 "pnpm install --frozen-lockfile && pnpm typecheck && pnpm test:run"）；空/缺失 = 跳过验证，信任 agent 声明
-}
-```
-
-> `verifyCommand` 为验证门：配置后每次发布前在分支临时 worktree（干净检出，随用随删）执行该命令，非零退出即停摆——留言说明验证失败、不发版、该 issue 本轮停止；零退出则正常继续发布。命令需自行准备依赖（如 `pnpm install --frozen-lockfile`，与沙箱共享宿主 pnpm store，秒级完成）。
-
-> 旧配置的 `label`（字符串或数组）字段会被自动迁移为 `labels` 数组，无需手动改。
-
-> 其余行为项硬编码为代码常量：完成信号固定 `<promise>COMPLETE</promise>`；日志位置固定为**目标项目目录下的 `.sandcastle/logs/`**（不再写入全局 `~/.afk/logs/`，旧文件保留原地不迁移不双写）。旧配置中的其他字段（如 `logDir`/`completionSignal`/`promptFile`）会被忽略且不报错。
-
----
-
-## 提示词模板
-
-采用 **sandcastle 官方标准**：主模板固定为项目 `.sandcastle/prompt.md`；resolve 模板（预同步冲突自动化解）固定为项目 `.sandcastle/resolve.md`。自定义提示词模板只有一条规则：**把模板文件放到对应路径（可提交 git，团队共享）**；没有则用包内内置默认模板。
-
-```
-主模板：
-  优先级 1   项目 .sandcastle/prompt.md   ← 用户自定义（可提交 git，团队共享）
-  优先级 2   包内 prompts/prompt.md       ← 默认（sandcastle 官方 simple-loop 命名）
-
-resolve 模板（T13 冲突自动化解）：
-  优先级 1   项目 .sandcastle/resolve.md   ← 用户自定义（可提交 git，团队共享）
-  优先级 2   包内 prompts/resolve.md       ← 默认（边界约束写死：一次机会 / 同一验收门槛 / 只解决冲突 / 禁止新功能 / 必须提交）
-```
-
-### 占位符
-
-| 占位符               | 内容                              |
-| -------------------- | --------------------------------- |
-| `{{ISSUE_NUMBER}}`   | issue 编号                        |
-| `{{ISSUE_TITLE}}`    | issue 标题                        |
-| `{{ISSUE_BODY}}`     | issue 正文                        |
-| `{{ISSUE_COMMENTS}}` | issue 评论（含用户追问）          |
-| `{{RECENT_COMMITS}}` | 最近 10 条 Ralph 提交（进度锚点） |
-| `{{BRANCH}}`         | 当前分支名                        |
-
-占位符注入是宿主侧行为（pi-afk 相对 sandcastle 官方“沙箱内执行 gh 命令”的差异化价值），模板可直接使用 `{{KEY}}`。
-
-### 初始化与 git 身份
-
-- `afk init`（或首次运行）会幂等地把默认模板复制到项目 `.sandcastle/prompt.md` 作为可编辑起点；已存在则跳过，不覆盖你的修改
-- 沙箱内 agent 的 git commit 自动使用宿主的 `user.name`/`user.email`（sandcastle 从宿主 git config 读取并注入沙箱），模板无需（也不应）硬编码身份
-
----
-
-## 与 prd-to-issues skill 集成
-
-配合 [prd-to-issues](../.pi/agent/skills/prd-to-issues/SKILL.md) skill，PRD → 垂直切片 → AFK 自动实现，形成完整闭环：
-
-```
-PRD issue → skill 拆成垂直切片（按依赖顺序创建）
-              ├─ HITL 切片 → --label hitl（架构决策/设计评审，人工处理）
-              └─ AFK 切片  → --label afk（pi-afk 自动实现 + 合并）
-```
-
-- **AFK 切片**：`gh issue create ... --label afk`，pi-afk 自动实现、开 PR、可自动合并（`afk` 需在配置 `labels` 中）
-- **HITL 切片**：`--label hitl`，pi-afk 不拉取；即使误标 `afk`，正文中的 `## 类型（Type）\n\nHITL` 标记也会被识别并跳过，`no-more-tasks` 事件会报告待人工处理的数量
-- **依赖顺序**：skill 按依赖顺序创建 issue，pi-afk 按编号升序处理，天然对齐
-
-开启自动合并以完整实现"AFK 切片无人参与实现并合并"：
-
-```jsonc
-// ~/.afk/config.json
-{ "autoMerge": true }
-```
-
-合并采用 `--squash --delete-branch`，PR body 中的 `Closes #N` 会让 GitHub 在合并时自动关闭 issue。
-
----
-
-## 依赖处理
-
-沙箱默认没有宿主项目的依赖，pi-afk 按 lockfile 类型自适应安装：
-
-| lockfile            | 策略                                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm-lock.yaml`    | **不复制宿主 node_modules**（macOS 产物是跨平台问题根源）；共享宿主 pnpm store（实测 149M 项目 1.9s 重建 Linux 原生依赖） |
-| `package-lock.json` | 复制宿主 node_modules + `npm install` 增量修复                                                                            |
-| `yarn.lock`         | 复制宿主 node_modules + `yarn install` 增量修复                                                                           |
-| 无 lockfile         | 复制宿主 node_modules，agent 自行处理                                                                                     |
-
-> pnpm store 是**可写**共享（pnpm 需写 sqlite 索引，实测只读会失败）。最坏情况是缓存损坏重新下载，非灾难。
-
-### 沙箱镜像与宿主对齐
-
-- **pnpm 版本**：构建镜像时自动注入宿主 `pnpm --version`（`ARG PNPM_VERSION` build-arg），沙箱内 pnpm 永远与宿主一致，不硬编码版本。
-- **UID/GID**：构建时注入宿主 `id -u` / `id -g`（sandcastle 预检要求）。
-- **Playwright/Chromium 预装**：镜像内置 chromium 系统依赖与浏览器二进制（`PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`）。精简 Debian 沙箱缺浏览器系统库且 agent 无 root 无法现装（hacxy.cn #24 事故：现场下载 .deb + LD_LIBRARY_PATH 硬凑、软件渲染极慢）；预装后 e2e 开箱即可跑。项目 playwright 版本与预装（1.62.x）不同时，agent 只需 `npx playwright install` 增量下载二进制（系统库已就绪）。
-- 宿主未安装 pnpm 时构建会明确报错（宁可失败也不静默漂移）。
-
-> 修改 Dockerfile 后镜像不会自动重建（`afk <N>` 仅在镜像不存在时构建）。让新镜像生效：`docker rmi pi-afk:latest`（或手动 `afk init` 前先删旧镜像）；已运行中的 run 不受影响（容器沿用旧镜像）。
-
----
-
-## 日志与事件
-
-日志写入**目标项目目录下的 `.sandcastle/logs/`**（issue #33，不再写入全局 `~/.afk/logs/`；旧文件保留原地不迁移、不双写）。`afk doctor` 会显示当前生效的日志路径。
-
-- **每次 issue 的沙箱日志**：`.sandcastle/logs/issue-<N>.log`（pi 原始输出，`tail -f` 可实时观察）；预同步冲突派发的 resolve run 为 `.sandcastle/logs/issue-<N>-resolve.log`
-- **事件流**：`.sandcastle/logs/afk.jsonl`（结构化 JSON lines，为 Web UI 预留）
-- **终端实时输出**（issue #34）：运行 `afk <N>` 时，事件（迭代开始 / 选中 issue / 结果 / 建 PR / 预同步冲突 / 验证失败 / 错误等）在**发生时立即打印**到终端，沙箱 agent 的实时输出同步**流式透传**——文本原样输出、工具调用折叠为一行、原始行原样输出；同时日志文件仍完整写入（见上，实时显示不影响落盘）。run 结束仅剩一行摘要（完成 N 个 issue、N 个 PR、N 个错误），**无重复输出**。非交互终端（管道 / 输出重定向）下行为一致（纯 stdout 写入，无 TUI、无 ANSI 转义依赖；对端提前关闭如 `afk 10 | head` 时静默退出不报错）
-
-日志条目类型：`run-start` / `run-end` / `iteration-start` / `issue-picked` / `issue-result`（含收敛补合并 `merged-existing-pr`）/ `presync-conflict` / `presync-fetch-failed` / `resolve-success` / `resolve-failed` / `verify-failed` / `convergence-skip`（含 `reason: merged|open-clean|dirty`）/ `convergence-check-failed` / `no-more-tasks` / `fetch-origin-main-failed` / `error`。
-
----
-
-## 安全模型
-
-**保守派沙箱**（对比激进派沙箱的取舍）：
-
-| 能力                     | 沙箱内 agent        | 宿主           |
-| ------------------------ | ------------------- | -------------- |
-| 凭据（DEEPSEEK_API_KEY） | ✅（模型必需）      | ✅             |
-| Git 提交                 | ✅（本地提交）      | —              |
-| push / PR / 关 issue     | ❌                  | ✅（统一执行） |
-| gh CLI                   | ❌（镜像不含）      | ✅             |
-| 宿主文件系统             | ❌（隔离 worktree） | ✅             |
-| 模型调用                 | ✅（沙箱网络）      | —              |
-
-选择保守派的理由：凭据永不进沙箱、远端写操作可审计、沙箱镜像可安全共享。
-
----
-
-## 故障排查
-
-| 现象                                                    | 原因                          | 解决                                                                                           |
-| ------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------- |
-| `Authentication Fails ... api key invalid`              | DEEPSEEK_API_KEY 未设置或无效 | `echo $DEEPSEEK_API_KEY` 确认；从平台重新生成                                                  |
-| `完成：没有可处理的开放 issue`                          | 没有符合条件的开放 issue      | `gh issue list` 查看；配置了 labels 时检查标签名与配置一致，未配置时检查是否确实没有开放 issue |
-| `Structured output tag <outcome> contains invalid JSON` | agent 输出不符合协议          | 查看 `.sandcastle/logs/issue-N.log` 尾部；通常是模型/网络问题，重试                            |
-| 镜像构建失败                                            | Docker/OrbStack 未运行        | 启动 OrbStack 后重试 `afk init`                                                                |
-| git push rejected (non-fast-forward)                    | issue 已处理过（旧分支残留）  | 合并/关闭旧 PR 和 issue；删除本地 `agent/issue-N` 分支                                         |
-| 沙箱内测试失败（平台二进制）                            | 宿主 node_modules 跨平台      | pnpm 项目已自动解决；npm/yarn 项目靠增量 install 修复                                          |
-
----
+| 变量                                                     | 默认                                         | 说明             |
+| -------------------------------------------------------- | -------------------------------------------- | ---------------- |
+| `AFK_IMAGE`                                              | `pi-workspace`                               | 工作容器镜像     |
+| `AFK_MODEL`                                              | `deepseek/deepseek-v4-flash`                 | implementer 模型 |
+| `AFK_PLANNER_MODEL`                                      | 同 MODEL                                     | planner 模型     |
+| `AFK_REVIEWER_MODEL`                                     | 同 MODEL                                     | reviewer 模型    |
+| `AFK_THINKING`                                           | `medium`                                     | 思考等级         |
+| `AFK_MAX_PARALLEL`                                       | `2`                                          | 并发信号量上限   |
+| `AFK_TODO_LABEL` / `AFK_DONE_LABEL` / `AFK_FAILED_LABEL` | `agent:todo` / `agent:done` / `agent:failed` | label 状态机     |
+| `AFK_BRANCH_PREFIX`                                      | `afk`                                        | 分支前缀         |
 
 ## 开发
 
 ```bash
 pnpm install
-pnpm build       # tsup 构建（产出 dist/）
-pnpm test:run    # 单元测试（vitest）
-pnpm lint        # eslint
-pnpm exec tsc --noEmit   # 类型检查
+pnpm run typecheck
+pnpm test
+pnpm build          # 产出 dist/cli.js（bin: afk）
 ```
 
-**端到端验证流程**（真实跑通）：在测试仓库创建 issue（配置了 labels 则带对应标签）→ `node dist/cli.js 1` → 观察沙箱 agent 工作 → 验证 PR 创建。
+## 范围（当前切片）
 
-### 路线图（未实现）
-
-- [ ] npm 发布（bin: afk）
-- [ ] 并行模式（事件模型已预留，processIssue 是纯异步函数）
-- [ ] Web UI（事件流数据已就绪）
-- [ ] 多模板集（implement/review/plan 等官方工作流）
+- ✅ 无人值守循环：planner → implementer → reviewer → push 分支 + 报告
+- ⏸️ merge/关 issue、交互模式（工具路由）、skills —— 后续轮次

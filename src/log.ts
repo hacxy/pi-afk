@@ -1,24 +1,35 @@
 import { appendFileSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { resolve } from 'node:path'
 
-/**
- * 全局结构化日志（JSON lines），为将来 Web UI 做数据源。
- * 每个事件一行 JSON，方便后续按类型/时间过滤。
- */
-export interface LogEntry {
-  type: string
-  [key: string]: unknown
+import { config } from './config.js'
+
+let logFile: string | undefined
+
+/** 主循环日志文件（每轮一个，按时间戳） */
+function ensureLogFile(): string | undefined {
+  if (logFile) return logFile
+  try {
+    const dir = resolve(config.logsDir)
+    mkdirSync(dir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    logFile = resolve(dir, `afk-${stamp}.log`)
+    return logFile
+  } catch {
+    return undefined
+  }
 }
 
-export function appendLog(logDir: string, entry: LogEntry): void {
-  try {
-    mkdirSync(logDir, { recursive: true })
-    appendFileSync(
-      join(logDir, 'afk.jsonl'),
-      JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n',
-      'utf8',
-    )
-  } catch {
-    // 日志失败不阻塞主流程
-  }
+export function log(msg: string): void {
+  const line = `[${new Date().toLocaleTimeString('zh-CN')}] ${msg}`
+  // eslint-disable-next-line no-console -- 主日志输出，日志模块本身职责
+  console.log(line)
+  const f = ensureLogFile()
+  if (f) appendFileSync(f, line + '\n')
+}
+
+export function logError(msg: string): void {
+  const line = `[${new Date().toLocaleTimeString('zh-CN')}] ✗ ${msg}`
+  console.error(line)
+  const f = ensureLogFile()
+  if (f) appendFileSync(f, line + '\n')
 }

@@ -1,41 +1,68 @@
-# pi-afk 沙箱镜像（保守派：零凭据，基础工具 + pi）
-FROM node:24-bookworm-slim
+# pi-workspace 工作容器（pi-afk 执行环境）
+# 用途：afk 无人值守循环里每个阶段的干净容器；交互模式（后续）的工具路由后端。
+#
+# 构建：docker build -t pi-workspace --build-arg AGENT_UID=$(id -u) --build-arg AGENT_GID=$(id -g) .
+#
+# 运行时约定（由 afk 编排器负责）：
+#   -v <worktree>:/workspace            项目写穿（node_modules 用匿名卷遮蔽，勿挂宿主 node_modules）
+#   -v /workspace/node_modules          匿名卷：容器内 Linux 依赖，与宿主 macOS node_modules 隔离
+#   -v <pi-home>:/home/agent/.pi        pi 配置/会话写穿宿主（可观测性）
+#   -e DEEPSEEK_API_KEY / GH_TOKEN      凭据注入（不挂宿主 auth 文件）
+#   -e GIT_AUTHOR_* / GIT_COMMITTER_*   容器内 git 提交身份
 
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates git curl ripgrep \
+# 版本参数化：目标项目依赖升级时重建镜像（默认值 = 当前目标项目环境）
+ARG NODE_VERSION=22
+FROM node:${NODE_VERSION}-bookworm
+
+# 基础工具 + GitHub CLI（拉取 issue、push 分支）
+RUN apt-get update && apt-get install -y \
+  git \
+  curl \
+  jq \
+  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+  && apt-get update && apt-get install -y gh \
   && rm -rf /var/lib/apt/lists/*
 
-# pi coding agent（与宿主 pi 版本保持一致）
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+# pnpm（corepack 固定版本，杜绝版本漂移）
+ARG PNPM_VERSION=11.21.0
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
-# pnpm（与宿主版本一致：afk CLI 构建镜像时自动传入宿主 pnpm --version 作为 PNPM_VERSION）
-ARG PNPM_VERSION
-RUN npm install -g --ignore-scripts pnpm@${PNPM_VERSION}
+# Playwright chromium + 系统库：e2e 需要。
+# 版本必须与目标项目 @playwright/test 匹配——项目升级 playwright 后需重建镜像。
+# 浏览器装到全局 /ms-playwright（root 构建时下载，agent 只读使用）；--with-deps 自动 apt 装系统库
+ARG PLAYWRIGHT_VERSION=1.62.1
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN pnpm dlx playwright@${PLAYWRIGHT_VERSION} install chromium --with-deps \
+  && rm -rf /var/lib/apt/lists/*
 
-# UID/GID 对齐宿主（sandcastle 预检要求，避免运行时权限问题）
-# 提前声明：浏览器预装目录的 chown 需要对齐最终 UID/GID
+# pi（与宿主版本一致）
+ARG PI_VERSION=0.84.1
+RUN npm install -g @earendil-works/pi-coding-agent@${PI_VERSION}
+
+# UID/GID 对齐宿主（macOS 上为 501:20），容器内文件权限与宿主一致
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
-
-# ── Playwright / Chromium 预装 ──────────────────────────────────────────────
-# 事故教训（hacxy.cn #24）：精简 Debian 沙箱缺 Chromium 系统库且 agent 无 root，
-#   曾现场下载 .deb 解压 + LD_LIBRARY_PATH 硬凑，浏览器软件渲染极慢、e2e 挂死。
-# 1) 系统依赖：playwright 官方 install-deps 安装与 Debian 版本匹配的库清单
-#    （不手写硬编码 apt 列表，随 playwright 演进自动对齐）
-# 2) 浏览器二进制：预下载 chromium + chrome-headless-shell 到镜像内共享目录
-#    /opt/ms-playwright（run 时免下载；项目 playwright 版本不同时 agent 仍可
-#    `npx playwright install` 增量补齐——系统库已就绪，仅需下载二进制）
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-RUN npx --yes playwright@1.62.1 install-deps chromium \
-  && npx --yes playwright@1.62.1 install chromium \
-  && chown -R ${AGENT_UID}:${AGENT_GID} /opt/ms-playwright \
-  && rm -rf /root/.npm /tmp/* /var/lib/apt/lists/*
-
 RUN groupmod -o -g $AGENT_GID node \
   && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 
+# /workspace/node_modules 是匿名卷遮蔽点（容器内 Linux 依赖，与宿主隔离）；
+# 匿名卷初始化时从镜像拷贝属主/权限——必须 agent 可写（/workspace 属主 root，故在切换前以 root 建）
+RUN mkdir -p /workspace/node_modules && chown ${AGENT_UID}:${AGENT_GID} /workspace/node_modules
 USER ${AGENT_UID}:${AGENT_GID}
-WORKDIR /home/agent
 
-# sandcastle 以 worktree 挂载 /home/agent/workspace
+# 以 agent 用户预热 corepack pnpm 缓存（root 预热只写 /root/.cache；此处消除 agent 首启下载失败点）
+ARG PNPM_VERSION=11.21.0
+RUN corepack prepare pnpm@${PNPM_VERSION} --activate
+
+# CI=true：pnpm 在无 TTY 下（docker exec）purge node_modules 时自动重装，不 abort
+ENV CI=true
+
+# envcheck：开工前环境自检（node/pnpm/playwright/挂载），不过立即失败并给出原因
+COPY --chown=${AGENT_UID}:${AGENT_GID} envcheck.sh /home/agent/bin/envcheck
+ENV PATH="/home/agent/bin:${PATH}"
+
+WORKDIR /workspace
 ENTRYPOINT ["sleep", "infinity"]

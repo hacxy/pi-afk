@@ -1,7 +1,7 @@
 {
   "name": "@hacxy/pi-afk",
   "version": "0.1.0",
-  "description": "AFK loop orchestrator for the pi coding agent, built on sandcastle",
+  "description": "AFK 无人值守循环编排器：基于 pi 的最小版 sandcastle（宿主编排 + 容器内 pi）",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -18,7 +18,8 @@
   "files": [
     "dist",
     "prompts",
-    "Dockerfile"
+    "Dockerfile",
+    "envcheck.sh"
   ],
   "scripts": {
     "dev": "tsup --watch",
@@ -32,7 +33,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-hero/sandcastle": "^0.12.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
