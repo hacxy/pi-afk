@@ -1,4 +1,7 @@
 import { execSync } from 'node:child_process'
+import { unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { config } from './config.js'
 
@@ -34,4 +37,20 @@ export function addLabel(number: number, label: string): void {
 
 export function removeLabel(number: number, label: string): void {
   gh(`issue edit ${number} --remove-label "${label}"`)
+}
+
+/** 当前仓库 owner/repo（compare 链接用） */
+export function repoName(): string {
+  return gh('repo view --json nameWithOwner --jq .nameWithOwner').trim()
+}
+
+/** 在 issue 上留 comment（成功/失败回报）。正文走 --body-file 避免 shell 转义。 */
+export function addComment(number: number, body: string): void {
+  const file = join(tmpdir(), `afk-comment-${number}-${Date.now()}.md`)
+  writeFileSync(file, body)
+  try {
+    gh(`issue comment ${number} --body-file "${file}"`)
+  } finally {
+    unlinkSync(file)
+  }
 }

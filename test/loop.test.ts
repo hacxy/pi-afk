@@ -1,26 +1,39 @@
 import type { Issue } from '../src/issues.js'
 import type { Sandbox } from '../src/sandbox.js'
 
+import { resolve } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { runAfk } from '../src/loop.js'
 
 vi.mock('../src/sandbox.js', () => ({ createSandbox: vi.fn() }))
 vi.mock('../src/git.js', () => ({
+  archiveWorktree: vi.fn(),
   branchName: vi.fn(),
   createWorktree: vi.fn(),
+  deleteBranch: vi.fn(),
   pushBranch: vi.fn(),
   removeWorktree: vi.fn(),
 }))
 vi.mock('../src/issues.js', () => ({
-  listTodoIssues: vi.fn(),
+  addComment: vi.fn(),
   addLabel: vi.fn(),
+  listTodoIssues: vi.fn(),
   removeLabel: vi.fn(),
+  repoName: vi.fn(),
 }))
-vi.mock('../src/log.js', () => ({ log: vi.fn(), logError: vi.fn() }))
+vi.mock('../src/log.js', () => ({ currentLogFile: vi.fn(), log: vi.fn(), logError: vi.fn() }))
 
-import { branchName, createWorktree, pushBranch, removeWorktree } from '../src/git.js'
-import { addLabel, listTodoIssues, removeLabel } from '../src/issues.js'
+import {
+  archiveWorktree,
+  branchName,
+  createWorktree,
+  deleteBranch,
+  pushBranch,
+  removeWorktree,
+} from '../src/git.js'
+import { addComment, addLabel, listTodoIssues, removeLabel, repoName } from '../src/issues.js'
+import { currentLogFile } from '../src/log.js'
 import { createSandbox } from '../src/sandbox.js'
 
 const issue: Issue = {
@@ -68,6 +81,9 @@ beforeEach(() => {
   vi.mocked(listTodoIssues).mockReturnValue([issue])
   vi.mocked(branchName).mockReturnValue('afk/issue-52-site-links-nav')
   vi.mocked(createWorktree).mockReturnValue('/tmp/wt')
+  vi.mocked(repoName).mockReturnValue('hacxy/pi-afk')
+  vi.mocked(archiveWorktree).mockReturnValue('.afk/failed/afk/issue-52-site-links-nav')
+  vi.mocked(currentLogFile).mockReturnValue(resolve('.afk/logs/afk-test.log'))
   vi.mocked(createSandbox).mockImplementation(async () => {
     const sandbox = makeSandbox()
     sandbox.runStage = vi
@@ -80,7 +96,7 @@ beforeEach(() => {
 })
 
 describe('runAfk 三阶段 pipeline（常驻容器）', () => {
-  it('成功：每 issue 一个容器，装依赖一次，三阶段复用同一容器，push + done label + 销毁', async () => {
+  it('成功：每 issue 一个容器，装依赖一次，三阶段复用同一容器，push + done label + comment + 销毁', async () => {
     const results = await runAfk()
     expect(results[0].status).toBe('done')
 
@@ -110,9 +126,19 @@ describe('runAfk 三阶段 pipeline（常驻容器）', () => {
     expect(removeLabel).toHaveBeenCalledWith(52, 'agent:todo')
     expect(sandbox.destroy).toHaveBeenCalledTimes(1)
     expect(removeWorktree).toHaveBeenCalledWith('/tmp/wt')
+
+    // 成功回报：分支名 + compare 链接；本地分支清理（重跑不被卡住）
+    expect(addComment).toHaveBeenCalledTimes(1)
+    const body = vi.mocked(addComment).mock.calls[0][1]
+    expect(body).toContain('afk/issue-52-site-links-nav')
+    expect(body).toContain(
+      'https://github.com/hacxy/pi-afk/compare/main...afk/issue-52-site-links-nav',
+    )
+    expect(deleteBranch).toHaveBeenCalledWith('afk/issue-52-site-links-nav')
+    expect(archiveWorktree).not.toHaveBeenCalled()
   })
 
-  it('失败（implementer 非零退出）：不 push、failed label、容器仍销毁', async () => {
+  it('失败（implementer 非零退出）：归档 worktree + 删本地分支 + 失败 comment + failed label，不 push', async () => {
     const sandbox = makeSandbox()
     sandbox.runStage = vi
       .fn()
@@ -126,28 +152,46 @@ describe('runAfk 三阶段 pipeline（常驻容器）', () => {
 
     expect(sandbox.runStage).toHaveBeenCalledTimes(2) // planner + implementer，无 reviewer
     expect(pushBranch).not.toHaveBeenCalled()
+
+    // 失败现场归档 + 删本地分支（改回 todo 能干净重跑）
+    expect(archiveWorktree).toHaveBeenCalledWith('/tmp/wt', 'afk/issue-52-site-links-nav')
+    expect(deleteBranch).toHaveBeenCalledWith('afk/issue-52-site-links-nav')
+    expect(removeWorktree).not.toHaveBeenCalled() // 已归档，不再 remove
+
+    // 失败回报：阶段 + 退出码 + stderr 摘要 + 产物路径 + 重跑提示
+    expect(addComment).toHaveBeenCalledTimes(1)
+    const body = vi.mocked(addComment).mock.calls[0][1]
+    expect(body).toContain('implementer')
+    expect(body).toContain('退出码：1')
+    expect(body).toContain('typecheck 失败')
+    expect(body).toContain('.afk/logs/afk-test.log') // 日志（已相对化）
+    expect(body).toContain('.afk/failed/afk/issue-52-site-links-nav') // 归档路径
+    expect(body).toContain('agent:todo') // 重跑提示
+
     expect(addLabel).toHaveBeenCalledWith(52, 'agent:failed')
     expect(removeLabel).toHaveBeenCalledWith(52, 'agent:todo')
     expect(sandbox.destroy).toHaveBeenCalledTimes(1) // 失败也销毁，无孤儿容器
-    expect(removeWorktree).toHaveBeenCalledWith('/tmp/wt')
   })
 
-  it('planner zod 校验非法重试 3 次仍失败 → failed，容器销毁', async () => {
+  it('planner zod 校验非法重试 3 次仍失败 → 归档 + failed comment（阶段 planner）', async () => {
     const sandbox = makeSandbox()
     sandbox.runStage = vi.fn().mockResolvedValue(okResult('不是 JSON'))
     vi.mocked(createSandbox).mockResolvedValue(sandbox)
 
     const results = await runAfk()
     expect(results[0].status).toBe('failed')
-    expect(results[0].error).toContain('planner 重试')
+    expect(results[0].error).toContain('planner')
 
     const stages = vi.mocked(sandbox.runStage).mock.calls.map(([ctx]) => ctx.stage)
     expect(stages).toEqual(['planner', 'planner', 'planner']) // 上限 2 次重试 = 3 次尝试
     expect(pushBranch).not.toHaveBeenCalled()
+    expect(archiveWorktree).toHaveBeenCalledTimes(1)
+    expect(deleteBranch).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(addComment).mock.calls[0][1]).toContain('planner')
     expect(sandbox.destroy).toHaveBeenCalledTimes(1)
   })
 
-  it('依赖安装失败 → failed，不跑任何阶段，容器销毁', async () => {
+  it('依赖安装失败 → 归档 + 删分支 + 失败 comment（阶段 install），不跑任何阶段', async () => {
     const sandbox = makeSandbox()
     sandbox.installDeps = vi.fn().mockRejectedValue(new Error('依赖安装失败（1）'))
     vi.mocked(createSandbox).mockResolvedValue(sandbox)
@@ -156,6 +200,9 @@ describe('runAfk 三阶段 pipeline（常驻容器）', () => {
     expect(results[0].status).toBe('failed')
     expect(results[0].error).toContain('依赖安装失败')
     expect(sandbox.runStage).not.toHaveBeenCalled()
+    expect(archiveWorktree).toHaveBeenCalledTimes(1)
+    expect(deleteBranch).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(addComment).mock.calls[0][1]).toContain('install')
     expect(sandbox.destroy).toHaveBeenCalledTimes(1)
   })
 

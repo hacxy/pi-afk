@@ -33,3 +33,8 @@ export function logError(msg: string): void {
   const f = ensureLogFile()
   if (f) appendFileSync(f, line + '\n')
 }
+
+/** 当前编排日志文件绝对路径（回报 comment 用；首个 log 之后才有值） */
+export function currentLogFile(): string | undefined {
+  return ensureLogFile()
+}

@@ -23,8 +23,12 @@ export const config = {
   failedLabel: process.env.AFK_FAILED_LABEL ?? 'agent:failed',
   /** 分支前缀 */
   branchPrefix: process.env.AFK_BRANCH_PREFIX ?? 'afk',
+  /** 基线分支（worktree 起点 + compare 链接 base） */
+  baseBranch: process.env.AFK_BASE_BRANCH ?? 'main',
   /** 运行时产物目录（相对 cwd） */
   worktreesDir: process.env.AFK_WORKTREES_DIR ?? '.afk/worktrees',
+  /** 失败现场归档目录（相对 cwd） */
+  failedDir: process.env.AFK_FAILED_DIR ?? '.afk/failed',
   piHomeDir: process.env.AFK_PI_HOME_DIR ?? '.afk/pi-home',
   logsDir: process.env.AFK_LOGS_DIR ?? '.afk/logs',
   /** 容器内 git 提交身份（agent commit 时注入） */
