@@ -220,14 +220,14 @@ export class JsonlSplitter {
   }
 }
 
-/** 阶段上下文：Executor「跑一个阶段」的输入（A6）。 */
+/** 阶段上下文：跑一个阶段的输入。 */
 export interface StageContext {
   prompt: string
   model: string
   stage: string
   branch: string
-  /** 目标项目 worktree 宿主路径（容器后端用；宿主后端忽略） */
-  worktree?: string
+  /** spawn cwd：目标项目 worktree 宿主绝对路径（pi 在这里读写文件） */
+  cwd?: string
 }
 
 export interface StageResult {
@@ -249,11 +249,6 @@ export interface ExecutorHooks {
   onText?: (delta: string) => void
 }
 
-/** Executor：「跑一个阶段」的最小抽象。后端只是薄的 spawn 命令，共享层消费事件。 */
-export interface Executor {
-  runStage(ctx: StageContext, hooks?: ExecutorHooks): Promise<StageResult>
-}
-
 /** spawn 工厂：默认 node:child_process spawn，测试注入假子进程 */
 export type SpawnFn = (command: string, args: string[], options: SpawnOptions) => ChildProcess
 
@@ -265,6 +260,10 @@ export interface JsonlStageOptions {
   idleMs: number
   completionMs: number
   sessionDir: string
+  /** spawn cwd（缺省继承进程 cwd） */
+  cwd?: string
+  /** spawn env 注入（合并进 process.env，如 git 提交身份） */
+  env?: NodeJS.ProcessEnv
 }
 
 /**
@@ -289,7 +288,11 @@ export function runJsonlStage(
   let settled = false
 
   return new Promise((resolvePromise) => {
-    const child = opts.spawnFn(opts.command, opts.args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = opts.spawnFn(opts.command, opts.args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: opts.cwd,
+      env: opts.env ? { ...process.env, ...opts.env } : undefined,
+    })
 
     const finish = (exitCode: number, stderr: string): void => {
       if (settled) return
@@ -376,7 +379,7 @@ export interface HostExecutorOptions {
  * 宿主后端：spawn `pi -p --mode json`，流式消费事件。
  * 委托共享核心 runJsonlStage（分帧 / 解析 / 双超时 / 落盘 / 退出码归一全在共享层）。
  */
-export class HostExecutor implements Executor {
+export class HostExecutor {
   private readonly spawnFn: SpawnFn
   private readonly idleMs: number
   private readonly completionMs: number
@@ -406,6 +409,13 @@ export class HostExecutor implements Executor {
       idleMs: this.idleMs,
       completionMs: this.completionMs,
       sessionDir: this.sessionDir,
+      cwd: ctx.cwd,
+      env: {
+        GIT_AUTHOR_NAME: config.gitAuthor,
+        GIT_AUTHOR_EMAIL: config.gitEmail,
+        GIT_COMMITTER_NAME: config.gitAuthor,
+        GIT_COMMITTER_EMAIL: config.gitEmail,
+      },
     })
   }
 }

@@ -5,8 +5,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# afk 运行时产物（worktree 快照 / pi-home / 日志）
-.afk/
+# afk 运行时产物（worktree 快照 / 日志 / 会话 / 失败归档）
+.pi/afk/
 
 # misc
 .DS_Store

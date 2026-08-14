@@ -1,5 +1,4 @@
 import type { Issue } from './issues.js'
-import type { Plan } from './plan.js'
 
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -23,20 +22,6 @@ const issueVars = (issue: Issue, branch: string) => ({
   BRANCH: branch,
 })
 
-export function plannerPrompt(issue: Issue, branch: string): string {
-  return render(load('planner.md'), issueVars(issue, branch))
-}
-
-export function implementerPrompt(issue: Issue, plan: Plan): string {
-  return render(load('implementer.md'), {
-    ...issueVars(issue, plan.branch),
-    PLAN: JSON.stringify(plan, null, 2),
-  })
-}
-
-export function reviewerPrompt(issue: Issue, plan: Plan): string {
-  return render(load('reviewer.md'), {
-    ...issueVars(issue, plan.branch),
-    PLAN: JSON.stringify(plan, null, 2),
-  })
+export function implementerPrompt(issue: Issue, branch: string): string {
+  return render(load('implementer.md'), issueVars(issue, branch))
 }

@@ -29,8 +29,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
 
 function usage(): void {
   log(`用法:
-  afk                    无人值守循环（拉 issue → planner/implementer/reviewer 容器 → push 分支）
-  afk run "<prompt>"     宿主本地即席跑一个 pi 会话（实时透传 + 落盘 .afk/sessions/）
+  afk                    无人值守循环（拉 agent:todo issue → 宿主单阶段 implementer → push → 开 PR）
+  afk run "<prompt>"     宿主本地即席跑一个 pi 会话（实时透传 + 落盘 .pi/afk/sessions/）
   afk --help             显示本帮助`)
 }
 

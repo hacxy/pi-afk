@@ -1,11 +1,12 @@
 /**
- * 回报渲染（A11）：issue comment 文案的纯函数层。
- * 成功：分支名 + compare 链接；失败：阶段 + 退出码 + stderr 摘要 + 产物路径 + 重跑提示。
+ * 回报渲染：issue comment 文案的纯函数层。
+ * 成功：分支名 + PR 链接 + compare 链接；失败：阶段 + 退出码 + stderr 摘要 + 产物路径 + 重跑提示。
  * 全部纯函数、无副作用，方便确定性测试。
  */
 
 export interface SuccessInfo {
   branch: string
+  prUrl: string
   compareUrl: string
 }
 
@@ -33,11 +34,15 @@ export function compareUrl(repo: string, base: string, branch: string): string {
   return `https://github.com/${repo}/compare/${base}...${branch}`
 }
 
-/** 成功回报：分支名 + compare 链接 */
+/** 成功回报：分支名 + PR 链接 + compare 链接 */
 export function successComment(info: SuccessInfo): string {
-  return ['✅ afk 完成', '', `- 分支：\`${info.branch}\``, `- compare：${info.compareUrl}`].join(
-    '\n',
-  )
+  return [
+    '✅ afk 完成',
+    '',
+    `- 分支：\`${info.branch}\``,
+    `- PR：${info.prUrl}`,
+    `- compare：${info.compareUrl}`,
+  ].join('\n')
 }
 
 /** 失败回报：阶段 + 退出码 + stderr 摘要 + 产物路径 + 重跑提示 */

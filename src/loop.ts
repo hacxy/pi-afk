@@ -3,6 +3,7 @@ import type { Issue } from './issues.js'
 import { isAbsolute, relative } from 'node:path'
 
 import { config } from './config.js'
+import { HostExecutor } from './executor.js'
 import {
   archiveWorktree,
   branchName,
@@ -11,12 +12,11 @@ import {
   pushBranch,
   removeWorktree,
 } from './git.js'
-import { addComment, addLabel, listTodoIssues, removeLabel, repoName } from './issues.js'
+import { installDeps } from './install.js'
+import { addComment, addLabel, listTodoIssues, openPr, removeLabel, repoName } from './issues.js'
 import { currentLogFile, log, logError } from './log.js'
-import { parsePlan, type Plan } from './plan.js'
-import { implementerPrompt, plannerPrompt, reviewerPrompt } from './prompts.js'
+import { implementerPrompt } from './prompts.js'
 import { compareUrl, failureComment, successComment } from './report.js'
-import { createSandbox, type Sandbox } from './sandbox.js'
 
 export interface IssueResult {
   issue: Issue
@@ -24,10 +24,7 @@ export interface IssueResult {
   error?: string
 }
 
-/** planner 结构化输出重试上限（zod 校验不过时在同一容器重跑 planner 阶段） */
-const PLAN_MAX_RETRIES = 2
-
-/** 阶段失败（带结构化回报信息）：agent 阶段非零退出 / 超时 / planner 校验耗尽 */
+/** 阶段失败（带结构化回报信息）：implementer 非零退出 / 超时 */
 class StageFailure extends Error {
   constructor(
     readonly stage: string,
@@ -62,7 +59,7 @@ export async function runAfk(): Promise<IssueResult[]> {
   log(`拉取到 ${issues.length} 个待处理 issue（label=${config.todoLabel}）`)
   if (issues.length === 0) return []
 
-  // 信号量并发（与 sandcastle 一致的 MAX_PARALLEL）
+  // 信号量并发（MAX_PARALLEL）
   let running = 0
   const queue: (() => void)[] = []
   const acquire = (): Promise<void> =>
@@ -93,72 +90,48 @@ export async function runAfk(): Promise<IssueResult[]> {
 async function processIssue(issue: Issue): Promise<IssueResult> {
   const branch = branchName(issue)
   let worktree: string | undefined
-  let sandbox: Sandbox | undefined
   let worktreeArchived = false
   let currentStage = 'git'
   try {
     log(`#${issue.number} 开始（${branch}）`)
     worktree = createWorktree(branch)
 
-    // 常驻容器：每 issue 一个，planner/implementer/reviewer 三阶段 docker exec 复用，依赖只装一次
-    currentStage = 'sandbox'
-    sandbox = await createSandbox({
-      image: config.image,
-      worktree,
-      repoRoot: process.cwd(),
-      branch,
-      installCmd: config.installCmd,
-    })
-
-    // onSandboxReady hook：容器就绪即装依赖（agent 不自装，D2）
+    // 宿主侧装依赖（编排层负责，agent 不自装）
     currentStage = 'install'
-    await sandbox.installDeps()
+    await installDeps(worktree)
 
-    // Phase 1: planner —— 输出结构化 plan（zod 校验 + 重试上限）
-    currentStage = 'planner'
-    const plan = await planPhase(sandbox, issue, branch, worktree)
-
-    // Phase 2: implementer —— 写代码 + 验证 + 提交
+    // 单阶段 implementer：写代码 + 验证 + 提交
     currentStage = 'implementer'
-    await stage(
-      sandbox,
-      worktree,
-      branch,
-      'implementer',
-      config.model,
-      implementerPrompt(issue, plan),
-    )
-
-    // Phase 3: reviewer —— 审查 + 直接修复 + 提交
-    currentStage = 'reviewer'
-    await stage(
-      sandbox,
-      worktree,
-      branch,
-      'reviewer',
-      config.reviewerModel,
-      reviewerPrompt(issue, plan),
-    )
+    await implementerPhase(worktree, branch, issue)
 
     // 宿主 push 分支
     currentStage = 'push'
     pushBranch(worktree, branch)
     log(`#${issue.number} 已 push → origin/${branch}`)
 
-    // 成功回报：分支名 + compare 链接（best-effort，不翻脸）
+    // 开 PR（body 带 Closes #N，人工 merge 时 GitHub 自动关 issue）
+    currentStage = 'pr'
+    const prUrl = openPr({
+      branch,
+      base: config.baseBranch,
+      title: issue.title,
+      body: prBody(issue),
+    })
+    log(`#${issue.number} PR 已开 → ${prUrl}`)
+
+    // 成功回报 + label 状态机：todo → done
     tryReport(
       () =>
         addComment(
           issue.number,
           successComment({
             branch,
+            prUrl,
             compareUrl: compareUrl(repoName(), config.baseBranch, branch),
           }),
         ),
       `#${issue.number} 成功回报`,
     )
-
-    // label 状态机：todo → done
     tryReport(() => addLabel(issue.number, config.doneLabel), `#${issue.number} 加 done label`)
     tryReport(() => removeLabel(issue.number, config.todoLabel), `#${issue.number} 移除 todo label`)
     log(`#${issue.number} 完成 ✓（label: ${config.todoLabel} → ${config.doneLabel}）`)
@@ -197,14 +170,17 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
     tryReport(() => removeLabel(issue.number, config.todoLabel), `#${issue.number} 移除 todo label`)
     return { issue, status: 'failed', error: message }
   } finally {
-    // 成功/失败都销毁容器（try/finally），无孤儿容器
-    if (sandbox) await sandbox.destroy()
-    // 成功路径：删 worktree + 删本地分支；失败路径已在 catch 归档并删分支
+    // 成功路径：删 worktree + 删本地分支（远程分支留给 PR）；失败路径已在 catch 归档并删分支
     if (worktree && !worktreeArchived) {
       removeWorktree(worktree)
       deleteBranch(branch)
     }
   }
+}
+
+/** PR body：Closes #N + issue 原文 */
+function prBody(issue: Issue): string {
+  return [`Closes #${issue.number}`, '', issue.body].join('\n')
 }
 
 /** gh 写操作 best-effort：回报/label 失败只记日志，不翻转 issue 结果 */
@@ -243,60 +219,26 @@ function failureInfo(
   }
 }
 
-/** planner 阶段：重跑直到拿到合法 plan（上限 PLAN_MAX_RETRIES） */
-async function planPhase(
-  sandbox: Sandbox,
-  issue: Issue,
-  branch: string,
-  worktree: string,
-): Promise<Plan> {
-  let lastError = ''
-  let lastSession = ''
-  for (let attempt = 0; attempt <= PLAN_MAX_RETRIES; attempt++) {
-    const result = await stage(
-      sandbox,
-      worktree,
+/** 单阶段 implementer：宿主 spawn pi，实时透传，非零退出抛带结构的 StageFailure */
+async function implementerPhase(worktree: string, branch: string, issue: Issue): Promise<void> {
+  log(`#${branch.split('/').pop()} implementer 阶段（${config.model}）…`)
+  const result = await new HostExecutor().runStage(
+    {
+      prompt: implementerPrompt(issue, branch),
+      model: config.model,
+      stage: 'implementer',
       branch,
-      'planner',
-      config.plannerModel,
-      plannerPrompt(issue, branch),
-    )
-    try {
-      return parsePlan(result.stdout)
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error)
-      lastSession = result.sessionFile
-      logError(`#${issue.number} planner 输出非法（第 ${attempt + 1} 次）：${lastError}`)
-    }
-  }
-  throw new StageFailure('planner', 1, lastError, lastSession, false)
-}
-
-/** 跑单个阶段：复用常驻容器（docker exec），非零退出即抛带结构的 StageFailure */
-async function stage(
-  sandbox: Sandbox,
-  worktree: string,
-  branch: string,
-  stageName: string,
-  model: string,
-  prompt: string,
-): Promise<{
-  stdout: string
-  stderr: string
-  exitCode: number
-  sessionFile: string
-  timedOut: boolean
-}> {
-  log(`#${branch.split('/').pop()} ${stageName} 阶段（${model}）…`)
-  const result = await sandbox.runStage({ worktree, prompt, model, stage: stageName, branch })
+      cwd: worktree,
+    },
+    { onText: (delta) => process.stdout.write(delta) },
+  )
   if (result.exitCode !== 0) {
     throw new StageFailure(
-      stageName,
+      'implementer',
       result.exitCode,
       result.stderr,
       result.sessionFile,
       result.timedOut,
     )
   }
-  return result
 }

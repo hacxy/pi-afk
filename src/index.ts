@@ -1,7 +1,9 @@
 export { runAfk } from './loop.js'
 export type { IssueResult } from './loop.js'
-export { planSchema, parsePlan, type Plan } from './plan.js'
 export { config } from './config.js'
+export { installCommand, installDeps } from './install.js'
+export { implementerPrompt } from './prompts.js'
+export { compareUrl, failureComment, successComment } from './report.js'
 export {
   HostExecutor,
   JsonlSplitter,
@@ -14,7 +16,6 @@ export {
   parseSessionHead,
   runJsonlStage,
   stripAnsi,
-  type Executor,
   type ExecutorHooks,
   type JsonlStageOptions,
   type PiEvent,
@@ -22,12 +23,3 @@ export {
   type StageContext,
   type StageResult,
 } from './executor.js'
-export {
-  ContainerSandbox,
-  collectOutput,
-  containerName,
-  createSandbox,
-  installCommand,
-  type Sandbox,
-  type SandboxOptions,
-} from './sandbox.js'
