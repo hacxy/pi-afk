@@ -1,7 +1,7 @@
 {
   "name": "@hacxy/pi-afk",
   "version": "0.1.0",
-  "description": "AFK 无人值守循环编排器：基于 pi 的最小版宿主编排 + 容器内 pi",
+  "description": "AFK 无人值守循环编排器：基于 pi 的宿主 worktree 完整流程编排",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -17,9 +17,7 @@
   },
   "files": [
     "dist",
-    "prompts",
-    "Dockerfile",
-    "envcheck.sh"
+    "prompts"
   ],
   "scripts": {
     "dev": "tsup --watch",
@@ -32,6 +30,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "cac": "^7.0.0",
+    "execa": "^10.0.1",
+    "p-map": "^7.0.6",
+    "strip-ansi": "^7.2.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

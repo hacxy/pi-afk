@@ -60,8 +60,8 @@ afterEach(() => {
 })
 
 describe('createWorktree（真实仓库）', () => {
-  it('从 origin/main 建 worktree + 本地分支', () => {
-    const path = createWorktree('afk/issue-1-demo', worktreesDir, repo)
+  it('从 origin/main 建 worktree + 本地分支', async () => {
+    const path = await createWorktree('afk/issue-1-demo', worktreesDir, repo)
     expect(existsSync(path)).toBe(true)
     expect(existsSync(join(path, 'README.md'))).toBe(true)
     expect(branchExists('afk/issue-1-demo')).toBe(true)
@@ -70,25 +70,25 @@ describe('createWorktree（真实仓库）', () => {
 })
 
 describe('deleteBranch（真实仓库）', () => {
-  it('删除本地分支；分支不存在也不抛', () => {
-    createWorktree('afk/issue-2-demo', worktreesDir, repo)
+  it('删除本地分支；分支不存在也不抛', async () => {
+    await createWorktree('afk/issue-2-demo', worktreesDir, repo)
     const path = worktreePath('afk/issue-2-demo', worktreesDir)
     // 先注销 worktree 再删分支（分支被 worktree 占用时 branch -D 会失败）
     sh(`git worktree remove "${path}" --force`)
     sh('git worktree prune')
-    deleteBranch('afk/issue-2-demo', repo)
+    await deleteBranch('afk/issue-2-demo', repo)
     expect(branchExists('afk/issue-2-demo')).toBe(false)
 
     // 幂等：不存在的分支不抛
-    expect(() => deleteBranch('afk/issue-never-existed')).not.toThrow()
+    await expect(deleteBranch('afk/issue-never-existed', repo)).resolves.toBeUndefined()
   })
 })
 
 describe('archiveWorktree（真实仓库）', () => {
-  it('把 worktree 目录搬到 failed/<branch>，注销注册，保留现场', () => {
-    const path = createWorktree('afk/issue-3-demo', worktreesDir, repo)
+  it('把 worktree 目录搬到 failed/<branch>，注销注册，保留现场', async () => {
+    const path = await createWorktree('afk/issue-3-demo', worktreesDir, repo)
     writeFileSync(join(path, 'WIP.txt'), 'agent 写的半成品\n')
-    const dest = archiveWorktree(path, 'afk/issue-3-demo', failedDir, repo)
+    const dest = await archiveWorktree(path, 'afk/issue-3-demo', failedDir, repo)
 
     expect(dest).toBe(join(failedDir, 'afk/issue-3-demo'))
     expect(existsSync(join(dest as string, 'WIP.txt'))).toBe(true) // 现场保留
@@ -96,29 +96,31 @@ describe('archiveWorktree（真实仓库）', () => {
     expect(worktrees()).not.toContain(path) // 注册已注销
 
     // 归档后可删分支（不再被 worktree 占用）
-    deleteBranch('afk/issue-3-demo', repo)
+    await deleteBranch('afk/issue-3-demo', repo)
     expect(branchExists('afk/issue-3-demo')).toBe(false)
   })
 
-  it('路径不存在时返回 undefined 不抛', () => {
-    expect(archiveWorktree('/nonexistent/path', 'afk/issue-x', failedDir, repo)).toBeUndefined()
+  it('路径不存在时返回 undefined 不抛', async () => {
+    await expect(
+      archiveWorktree('/nonexistent/path', 'afk/issue-x', failedDir, repo),
+    ).resolves.toBeUndefined()
   })
 })
 
 describe('cleanupStale + 干净重跑（真实仓库）', () => {
-  it('残留 worktree + 分支时，再次 createWorktree 能清理干净并成功重跑', () => {
+  it('残留 worktree + 分支时，再次 createWorktree 能清理干净并成功重跑', async () => {
     // 第一次跑：建 worktree + 分支（模拟上次跑完后残留——未删分支/worktree）
-    const first = createWorktree('afk/issue-4-demo', worktreesDir, repo)
+    const first = await createWorktree('afk/issue-4-demo', worktreesDir, repo)
     writeFileSync(join(first, 'attempt1.txt'), '1')
     expect(branchExists('afk/issue-4-demo')).toBe(true)
 
     // 直接 cleanupStale 应清掉 worktree + 分支
-    cleanupStale('afk/issue-4-demo', worktreesDir, repo)
+    await cleanupStale('afk/issue-4-demo', worktreesDir, repo)
     expect(existsSync(first)).toBe(false)
     expect(branchExists('afk/issue-4-demo')).toBe(false)
 
     // 重跑：createWorktree 内部先 cleanupStale，不被残留卡住
-    const second = createWorktree('afk/issue-4-demo', worktreesDir, repo)
+    const second = await createWorktree('afk/issue-4-demo', worktreesDir, repo)
     expect(existsSync(second)).toBe(true)
     expect(branchExists('afk/issue-4-demo')).toBe(true)
     expect(existsSync(join(second, 'attempt1.txt'))).toBe(false) // 从 origin/main 全新重建

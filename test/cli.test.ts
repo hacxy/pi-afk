@@ -1,40 +1,72 @@
-import { describe, expect, it } from 'vitest'
+import { execa } from 'execa'
+import { resolve } from 'node:path'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { parseCliArgs } from '../src/cli.js'
+vi.mock('../src/index.js', () => ({ runAfk: vi.fn() }))
+vi.mock('../src/log.js', () => ({ log: vi.fn(), logError: vi.fn() }))
 
-describe('parseCliArgs 参数解析', () => {
-  it('无参数 → 无人值守循环', () => {
-    expect(parseCliArgs([])).toEqual({ command: 'loop' })
+import { runAfkLoop } from '../src/cli.js'
+import { runAfk } from '../src/index.js'
+import { log, logError } from '../src/log.js'
+
+const issue = (number: number, title: string) => ({ number, title, body: 'body', labels: [] })
+
+beforeEach(() => {
+  vi.clearAllMocks()
+})
+
+describe('runAfkLoop（默认命令 action）', () => {
+  it('全部成功 → 汇总 + exitCode 0', async () => {
+    vi.mocked(runAfk).mockResolvedValue([
+      { issue: issue(1, '甲'), status: 'done' },
+      { issue: issue(2, '乙'), status: 'done' },
+    ])
+
+    await runAfkLoop()
+
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('2/2 成功'))
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('#1 甲'))
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('#2 乙'))
+    expect(logError).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(0)
   })
 
-  it('afk run "<prompt>" → run 命令', () => {
-    expect(parseCliArgs(['run', '实现登录页'])).toEqual({ command: 'run', prompt: '实现登录页' })
+  it('有失败 → 汇总列出失败 + exitCode 1', async () => {
+    vi.mocked(runAfk).mockResolvedValue([
+      { issue: issue(1, '甲'), status: 'done' },
+      { issue: issue(3, '丙'), status: 'failed', error: 'implementer 退出码 1' },
+    ])
+
+    await runAfkLoop()
+
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('1/2 成功'))
+    expect(logError).toHaveBeenCalledWith(expect.stringContaining('#3 丙'))
+    expect(logError).toHaveBeenCalledWith(expect.stringContaining('implementer 退出码 1'))
+    expect(process.exitCode).toBe(1)
+  })
+})
+
+describe('cac CLI 冒烟', () => {
+  it('--help 输出用法且 exit 0', async () => {
+    const { stdout, exitCode } = await execa('node', [
+      '--import',
+      'tsx',
+      resolve('src/cli.ts'),
+      '--help',
+    ])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain('afk')
+    expect(stdout).toContain('Usage')
   })
 
-  it('prompt 多词完整拼接', () => {
-    expect(parseCliArgs(['run', '修复', '登录', 'bug'])).toEqual({
-      command: 'run',
-      prompt: '修复 登录 bug',
-    })
-  })
-
-  it('run 缺 prompt → 报错', () => {
-    expect(parseCliArgs(['run'])).toEqual({
-      command: 'error',
-      error: expect.stringContaining('prompt'),
-    })
-  })
-
-  it('--help / -h → help', () => {
-    expect(parseCliArgs(['--help'])).toEqual({ command: 'help' })
-    expect(parseCliArgs(['-h'])).toEqual({ command: 'help' })
-    expect(parseCliArgs(['help'])).toEqual({ command: 'help' })
-  })
-
-  it('未知命令 → 报错', () => {
-    expect(parseCliArgs(['frobnicate'])).toEqual({
-      command: 'error',
-      error: expect.stringContaining('frobnicate'),
-    })
+  it('--version 输出版本号且 exit 0', async () => {
+    const { stdout, exitCode } = await execa('node', [
+      '--import',
+      'tsx',
+      resolve('src/cli.ts'),
+      '--version',
+    ])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain('0.1.0')
   })
 })

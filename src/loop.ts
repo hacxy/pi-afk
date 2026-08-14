@@ -1,6 +1,7 @@
 import type { Issue } from './issues.js'
 
 import { isAbsolute, relative } from 'node:path'
+import pMap from 'p-map'
 
 import { config } from './config.js'
 import { HostExecutor } from './executor.js'
@@ -51,7 +52,7 @@ function reportPath(p: string | undefined): string | undefined {
 export async function runAfk(): Promise<IssueResult[]> {
   let issues: Issue[]
   try {
-    issues = listTodoIssues()
+    issues = await listTodoIssues()
   } catch (error) {
     logError(`拉取 issue 失败：${error instanceof Error ? error.message : error}`)
     return []
@@ -59,32 +60,19 @@ export async function runAfk(): Promise<IssueResult[]> {
   log(`拉取到 ${issues.length} 个待处理 issue（label=${config.todoLabel}）`)
   if (issues.length === 0) return []
 
-  // 信号量并发（MAX_PARALLEL）
-  let running = 0
-  const queue: (() => void)[] = []
-  const acquire = (): Promise<void> =>
-    running < config.maxParallel
-      ? (running++, Promise.resolve())
-      : new Promise<void>((resolvePromise) => queue.push(resolvePromise))
-  const release = (): void => {
-    running--
-    queue.shift()?.()
-  }
-
-  const results = await Promise.all(
-    issues.map(async (issue): Promise<IssueResult> => {
-      await acquire()
+  // p-map 并发（MAX_PARALLEL）：单个 issue 意外异常不影响其他 issue
+  return pMap(
+    issues,
+    async (issue) => {
       try {
         return await processIssue(issue)
       } catch (error) {
         logError(`#${issue.number} 处理异常：${error instanceof Error ? error.message : error}`)
         return { issue, status: 'failed', error: String(error) }
-      } finally {
-        release()
       }
-    }),
+    },
+    { concurrency: config.maxParallel },
   )
-  return results
 }
 
 async function processIssue(issue: Issue): Promise<IssueResult> {
@@ -94,7 +82,7 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
   let currentStage = 'git'
   try {
     log(`#${issue.number} 开始（${branch}）`)
-    worktree = createWorktree(branch)
+    worktree = await createWorktree(branch)
 
     // 宿主侧装依赖（编排层负责，agent 不自装）
     currentStage = 'install'
@@ -106,12 +94,12 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
 
     // 宿主 push 分支
     currentStage = 'push'
-    pushBranch(worktree, branch)
+    await pushBranch(worktree, branch)
     log(`#${issue.number} 已 push → origin/${branch}`)
 
     // 开 PR（body 带 Closes #N，人工 merge 时 GitHub 自动关 issue）
     currentStage = 'pr'
-    const prUrl = openPr({
+    const prUrl = await openPr({
       branch,
       base: config.baseBranch,
       title: issue.title,
@@ -120,20 +108,26 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
     log(`#${issue.number} PR 已开 → ${prUrl}`)
 
     // 成功回报 + label 状态机：todo → done
-    tryReport(
-      () =>
+    await tryReport(
+      async () =>
         addComment(
           issue.number,
           successComment({
             branch,
             prUrl,
-            compareUrl: compareUrl(repoName(), config.baseBranch, branch),
+            compareUrl: compareUrl(await repoName(), config.baseBranch, branch),
           }),
         ),
       `#${issue.number} 成功回报`,
     )
-    tryReport(() => addLabel(issue.number, config.doneLabel), `#${issue.number} 加 done label`)
-    tryReport(() => removeLabel(issue.number, config.todoLabel), `#${issue.number} 移除 todo label`)
+    await tryReport(
+      () => addLabel(issue.number, config.doneLabel),
+      `#${issue.number} 加 done label`,
+    )
+    await tryReport(
+      () => removeLabel(issue.number, config.todoLabel),
+      `#${issue.number} 移除 todo label`,
+    )
     log(`#${issue.number} 完成 ✓（label: ${config.todoLabel} → ${config.doneLabel}）`)
     return { issue, status: 'done' }
   } catch (error) {
@@ -142,13 +136,13 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
     logError(`#${issue.number} 失败：${message}`)
 
     // 失败现场归档 + 删本地分支（改回 todo 重跑不被残留卡住）
-    const archivePath = worktree ? archiveWorktree(worktree, branch) : undefined
+    const archivePath = worktree ? await archiveWorktree(worktree, branch) : undefined
     if (archivePath) worktreeArchived = true
-    deleteBranch(branch)
+    await deleteBranch(branch)
 
     // 失败回报：阶段 + 退出码 + stderr 摘要 + 产物路径 + 重跑提示（best-effort）
-    tryReport(
-      () =>
+    await tryReport(
+      async () =>
         addComment(
           issue.number,
           failureComment({
@@ -166,14 +160,20 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
     )
 
     // label 状态机：todo → failed（手动重置回 todo 才会重跑）
-    tryReport(() => addLabel(issue.number, config.failedLabel), `#${issue.number} 加 failed label`)
-    tryReport(() => removeLabel(issue.number, config.todoLabel), `#${issue.number} 移除 todo label`)
+    await tryReport(
+      () => addLabel(issue.number, config.failedLabel),
+      `#${issue.number} 加 failed label`,
+    )
+    await tryReport(
+      () => removeLabel(issue.number, config.todoLabel),
+      `#${issue.number} 移除 todo label`,
+    )
     return { issue, status: 'failed', error: message }
   } finally {
     // 成功路径：删 worktree + 删本地分支（远程分支留给 PR）；失败路径已在 catch 归档并删分支
     if (worktree && !worktreeArchived) {
-      removeWorktree(worktree)
-      deleteBranch(branch)
+      await removeWorktree(worktree)
+      await deleteBranch(branch)
     }
   }
 }
@@ -184,9 +184,9 @@ function prBody(issue: Issue): string {
 }
 
 /** gh 写操作 best-effort：回报/label 失败只记日志，不翻转 issue 结果 */
-function tryReport(fn: () => void, context: string): void {
+async function tryReport(fn: () => Promise<void>, context: string): Promise<void> {
   try {
-    fn()
+    await fn()
   } catch (error) {
     logError(`${context} 失败：${error instanceof Error ? error.message : error}`)
   }

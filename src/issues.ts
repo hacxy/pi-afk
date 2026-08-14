@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from 'node:child_process'
+import { execa } from 'execa'
 import { unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,16 +12,26 @@ export interface Issue {
   labels: string[]
 }
 
-function gh(args: string): string {
-  return execSync(`gh ${args}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+/** 跑 gh 命令：参数数组传递（无 shell 转义风险），非零退出/spawn 失败 reject。 */
+async function gh(args: string[]): Promise<string> {
+  const { stdout } = await execa('gh', args)
+  return stdout
 }
 
 /** 拉取待处理 issue：含 agent:todo，且不含 done/failed（label 状态机入口） */
-export function listTodoIssues(): Issue[] {
-  const raw = gh(
-    `issue list --label "${config.todoLabel}" --state open --json number,title,body,labels ` +
-      `--jq '.[] | {number: .number, title: .title, body: .body, labels: [.labels[].name]}'`,
-  )
+export async function listTodoIssues(): Promise<Issue[]> {
+  const raw = await gh([
+    'issue',
+    'list',
+    '--label',
+    config.todoLabel,
+    '--state',
+    'open',
+    '--json',
+    'number,title,body,labels',
+    '--jq',
+    '.[] | {number: .number, title: .title, body: .body, labels: [.labels[].name]}',
+  ])
   const issues = raw
     .split('\n')
     .filter((l) => l.trim())
@@ -31,60 +41,57 @@ export function listTodoIssues(): Issue[] {
   )
 }
 
-export function addLabel(number: number, label: string): void {
-  gh(`issue edit ${number} --add-label "${label}"`)
+export async function addLabel(number: number, label: string): Promise<void> {
+  await gh(['issue', 'edit', String(number), '--add-label', label])
 }
 
-export function removeLabel(number: number, label: string): void {
-  gh(`issue edit ${number} --remove-label "${label}"`)
+export async function removeLabel(number: number, label: string): Promise<void> {
+  await gh(['issue', 'edit', String(number), '--remove-label', label])
 }
 
 /**
  * 开 PR（D1）：head=afk 分支，base=基线分支，body 带 Closes #N（人工 merge 时 GitHub 自动关 issue）。
- * execFileSync 传参数组，规避 shell 转义；返回 PR URL。
+ * body 走 --body-file 避免 shell 转义；返回 PR URL。
  */
-export function openPr(opts: {
+export async function openPr(opts: {
   branch: string
   base: string
   title: string
   body: string
-}): string {
+}): Promise<string> {
   const file = join(tmpdir(), `afk-pr-${Date.now()}.md`)
   writeFileSync(file, opts.body)
   try {
-    const url = execFileSync(
-      'gh',
-      [
-        'pr',
-        'create',
-        '--head',
-        opts.branch,
-        '--base',
-        opts.base,
-        '--title',
-        opts.title,
-        '--body-file',
-        file,
-      ],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
-    ).trim()
-    return url
+    const url = await gh([
+      'pr',
+      'create',
+      '--head',
+      opts.branch,
+      '--base',
+      opts.base,
+      '--title',
+      opts.title,
+      '--body-file',
+      file,
+    ])
+    return url.trim()
   } finally {
     unlinkSync(file)
   }
 }
 
 /** 当前仓库 owner/repo（compare 链接用） */
-export function repoName(): string {
-  return gh('repo view --json nameWithOwner --jq .nameWithOwner').trim()
+export async function repoName(): Promise<string> {
+  const out = await gh(['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'])
+  return out.trim()
 }
 
 /** 在 issue 上留 comment（成功/失败回报）。正文走 --body-file 避免 shell 转义。 */
-export function addComment(number: number, body: string): void {
+export async function addComment(number: number, body: string): Promise<void> {
   const file = join(tmpdir(), `afk-comment-${number}-${Date.now()}.md`)
   writeFileSync(file, body)
   try {
-    gh(`issue comment ${number} --body-file "${file}"`)
+    await gh(['issue', 'comment', String(number), '--body-file', file])
   } finally {
     unlinkSync(file)
   }

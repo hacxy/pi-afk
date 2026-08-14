@@ -1,15 +1,15 @@
 /**
  * 共享执行层：Executor 接口 + `--mode json` 事件流处理。
  *
- * 所有后端（宿主 spawn pi / 容器 docker exec）共用的纯逻辑：
- * JSONL 分帧、事件解析、text 还原、退出码归一、双超时监守、会话落盘。
- * 后端只是薄的 spawn 命令，事件从这里流式消费。
+ * 宿主 spawn pi 的事件流消费核心：JSONL 分帧、事件解析、text 还原、退出码归一、
+ * 双超时监守、会话落盘。
  */
 
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import os from 'node:os'
 import { dirname, join } from 'node:path'
+import stripAnsi from 'strip-ansi'
 
 import { config } from './config.js'
 
@@ -182,12 +182,7 @@ export function assembleText(events: PiEvent[]): string {
 }
 
 /** 清洗 ANSI 转义序列（pi 启动时向 stderr 发 TUI 清屏码，如 \u001b[2J）。 */
-// eslint-disable-next-line no-control-regex -- 需要匹配控制字符
-const ANSI_RE = /\u001b\[[0-9;?]*[A-Za-z]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b[()][A-Z0-9]/g
-
-export function stripAnsi(text: string): string {
-  return text.replace(ANSI_RE, '')
-}
+export { stripAnsi }
 
 /**
  * JSONL 分帧器（有状态）：把流式 chunk 切成完整行。
@@ -272,8 +267,6 @@ export interface JsonlStageOptions {
  * - 终态判定 agent_settled / agent_end(willRetry=false)（A9）
  * - 双超时：idle 无活动 / completion 宽限到期 → kill + timedOut
  * - 退出码归一（正常 / 信号 / spawn 失败）
- *
- * 宿主后端（spawn pi）与容器后端（docker exec pi）共用；后端只是薄命令。
  */
 export function runJsonlStage(
   ctx: StageContext,

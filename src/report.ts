@@ -11,7 +11,7 @@ export interface SuccessInfo {
 }
 
 export interface FailureInfo {
-  /** 失败阶段（planner / implementer / reviewer / git / sandbox / install / push …） */
+  /** 失败阶段（implementer / git / install / push …） */
   stage: string
   /** 退出码（agent 阶段为 pi 退出码，编排/基础设施失败归 1） */
   exitCode: number

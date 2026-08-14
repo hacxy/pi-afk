@@ -1,34 +1,13 @@
-import { EventEmitter } from 'node:events'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PassThrough } from 'node:stream'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>()
-  return { ...actual, spawn: vi.fn() }
-})
+vi.mock('execa', () => ({ execa: vi.fn() }))
 
-import { spawn } from 'node:child_process'
+import { execa } from 'execa'
 
 import { installCommand, installDeps } from '../src/install.js'
-
-function fakeChild(): EventEmitter & {
-  stdout: PassThrough
-  stderr: PassThrough
-  kill: ReturnType<typeof vi.fn>
-} {
-  const child = new EventEmitter() as EventEmitter & {
-    stdout: PassThrough
-    stderr: PassThrough
-    kill: ReturnType<typeof vi.fn>
-  }
-  child.stdout = new PassThrough()
-  child.stderr = new PassThrough()
-  child.kill = vi.fn()
-  return child
-}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -60,16 +39,14 @@ describe('installCommand（lockfile 检测）', () => {
 })
 
 describe('installDeps（宿主侧安装）', () => {
-  it('成功：在 worktree cwd spawn install，CI=true，exit 0 → resolve', async () => {
+  it('成功：在 worktree cwd 跑 install，CI=true，exit 0 → resolve', async () => {
     const wt = mkdtempSync(join(tmpdir(), 'afk-install-'))
     writeFileSync(join(wt, 'pnpm-lock.yaml'), '')
-    const child = fakeChild()
-    vi.mocked(spawn).mockReturnValue(child as never)
+    vi.mocked(execa).mockResolvedValue({ stdout: '', stderr: '' } as never)
 
-    const promise = installDeps(wt)
-    await new Promise((r) => setImmediate(r))
+    await expect(installDeps(wt)).resolves.toBeUndefined()
 
-    expect(spawn).toHaveBeenCalledWith(
+    expect(execa).toHaveBeenCalledWith(
       'pnpm',
       ['install', '--frozen-lockfile'],
       expect.objectContaining({
@@ -77,20 +54,13 @@ describe('installDeps（宿主侧安装）', () => {
         env: expect.objectContaining({ CI: 'true' }),
       }),
     )
-    child.emit('exit', 0, null)
-    await expect(promise).resolves.toBeUndefined()
   })
 
-  it('失败：exit 非 0 → reject（带退出码与 stderr 摘要）', async () => {
+  it('失败：非零退出 → reject（带退出码与 stderr 摘要）', async () => {
     const wt = mkdtempSync(join(tmpdir(), 'afk-install-'))
     writeFileSync(join(wt, 'pnpm-lock.yaml'), '')
-    const child = fakeChild()
-    vi.mocked(spawn).mockReturnValue(child as never)
+    vi.mocked(execa).mockRejectedValue({ exitCode: 1, stderr: 'ERR! 依赖解析失败' })
 
-    const promise = installDeps(wt)
-    await new Promise((r) => setImmediate(r))
-    child.stderr.write('ERR! 依赖解析失败')
-    child.emit('exit', 1, null)
-    await expect(promise).rejects.toThrow(/依赖安装失败（1）/)
+    await expect(installDeps(wt)).rejects.toThrow(/依赖安装失败（1）/)
   })
 })
