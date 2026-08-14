@@ -13,9 +13,9 @@
 - 选项：自动 merge 并关 issue；开 PR 等人工 merge；维持现状。
 - 影响：整个工具的"省心程度"，也是与 sandcastle 差最多的地方。
 
-### D2. 依赖 install 谁负责
+### D2. 依赖 install 谁负责 —— ✅ 已定（issue #39，见 [decisions.md §9](./decisions.md#9-a7d2-落地容器常驻后端--依赖编排层安装issue-39已实现)）
 
-`pnpm install` 是继续写进 implementer prompt 让 agent 自装，还是 afk 编排层在容器就绪时用 hook 主动装（sandcastle `hooks.sandbox.onSandboxReady` 模式）？
+编排层在容器就绪时用 hook 主动装（onSandboxReady 模式）：lockfile 检测安装命令，`AFK_INSTALL_CMD` 可覆盖；agent 不自装，prompt 已移除 install 指令。
 
 ### D3. 值守模式的 CLI 形态
 

@@ -9,17 +9,18 @@
 ```
 afk（宿主 ts 程序，零 pi SDK 依赖）
   → gh 拉 open issues（label: agent:todo，且不含 done/failed）
-  → 每个 issue：一个 git worktree，三阶段串行，各一个干净容器
-       planner 容器（pi -p → 结构化 JSON plan → zod 校验）
-     → implementer 容器（pi -p → 写代码 + 验证 + commit）
-     → reviewer 容器（pi -p → 审查 + 直接修复 + commit）
+  → 每个 issue：一个 git worktree + 一个常驻容器，三阶段 docker exec 复用
+       planner（pi -p → 结构化 JSON plan → zod 校验）
+     → implementer（pi -p → 写代码 + 验证 + 容器内 commit）
+     → reviewer（pi -p → 审查 + 直接修复 + commit）
   → 宿主 push 分支 origin/afk/issue-N-slug
   → label 状态机：agent:todo → agent:done（成功）/ agent:failed（失败）
 ```
 
-- **容器隔离**：每个阶段 `docker run --rm` 干净容器，容器内 `pnpm install`（不挂宿主 store，稳优先）
+- **容器隔离**：每 issue 一个常驻容器（`docker run -d` + `docker exec`），三阶段复用、依赖只装一次；成功/失败均 `try/finally` 销毁（无孤儿容器）
+- **依赖安装**：编排层在容器就绪时按 lockfile 主动装（pnpm/npm/yarn/bun），agent 不自装（`AFK_INSTALL_CMD` 可覆盖）
 - **并发**：信号量 `MAX_PARALLEL`（默认 2）
-- **可观测性**：容器内 pi session 落盘 `.afk/pi-home/<branch>/` + 宿主日志 `.afk/logs/afk-*.log`
+- **可观测性**：容器内 pi session 以 `--mode json` 事件流落盘 `.afk/sessions/<branch>-<stage>.jsonl` + 宿主日志 `.afk/logs/afk-*.log`
 
 ## 快速开始
 
@@ -56,6 +57,7 @@ afk run "修复登录页 bug"
 | `AFK_TODO_LABEL` / `AFK_DONE_LABEL` / `AFK_FAILED_LABEL` | `agent:todo` / `agent:done` / `agent:failed` | label 状态机                                |
 | `AFK_BRANCH_PREFIX`                                      | `afk`                                        | 分支前缀                                    |
 | `AFK_SESSIONS_DIR`                                       | `.afk/sessions`                              | 会话 JSONL 落盘目录（`--mode json` 事件流） |
+| `AFK_INSTALL_CMD`                                        | 按 lockfile 检测                             | 依赖安装命令覆盖（容器就绪时编排层执行）    |
 | `AFK_IDLE_TIMEOUT_SEC`                                   | `600`                                        | idle 超时（无事件活动上限，秒）             |
 | `AFK_COMPLETION_TIMEOUT_SEC`                             | `60`                                         | completion 宽限（终态后等进程退出，秒）     |
 
@@ -70,6 +72,6 @@ pnpm build          # 产出 dist/cli.js（bin: afk）
 
 ## 范围（当前切片）
 
-- ✅ 无人值守循环：planner → implementer → reviewer → push 分支 + 报告
+- ✅ 无人值守循环：常驻容器三阶段（planner → implementer → reviewer → push 分支）+ 报告；依赖编排层安装一次
 - ✅ `afk run "<prompt>"` 即席命令：宿主本地单会话 pi，实时透传 + 会话 JSONL 落盘 + 双超时
-- ⏸️ 容器后端迁移到共享层（Executor）、merge/关 issue、交互模式（工具路由）、skills —— 后续轮次
+- ⏸️ planner 续跑重试（`pi --session` 喂回校验错误）、超时判失败、SIGINT 优雅打断；回报 + 失败归档 + 关 issue；交互模式（工具路由）、skills —— 后续轮次

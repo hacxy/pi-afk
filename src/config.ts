@@ -32,6 +32,8 @@ export const config = {
   gitEmail: process.env.AFK_GIT_EMAIL ?? 'afk@hacxy.cn',
   /** 会话记录目录：--mode json 事件流落盘 */
   sessionsDir: process.env.AFK_SESSIONS_DIR ?? '.afk/sessions',
+  /** 依赖安装命令覆盖（默认按 worktree lockfile 检测，D2） */
+  installCmd: process.env.AFK_INSTALL_CMD,
   /** 双超时（秒）：idle = 无事件活动上限；completion = 终态后等待进程退出宽限 */
   idleTimeoutSec: Number(process.env.AFK_IDLE_TIMEOUT_SEC ?? 600),
   completionTimeoutSec: Number(process.env.AFK_COMPLETION_TIMEOUT_SEC ?? 60),

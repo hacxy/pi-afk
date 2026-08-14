@@ -12,11 +12,22 @@ export {
   normalizeExitCode,
   parseEvent,
   parseSessionHead,
+  runJsonlStage,
   stripAnsi,
   type Executor,
   type ExecutorHooks,
+  type JsonlStageOptions,
   type PiEvent,
   type SpawnFn,
   type StageContext,
   type StageResult,
 } from './executor.js'
+export {
+  ContainerSandbox,
+  collectOutput,
+  containerName,
+  createSandbox,
+  installCommand,
+  type Sandbox,
+  type SandboxOptions,
+} from './sandbox.js'

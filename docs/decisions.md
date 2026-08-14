@@ -121,3 +121,21 @@ docker run ... \
 - agent 可写：`.git/objects`、`refs/heads/*`（宿主本地分支指针）、`.git/worktrees/<branch>`、index。objects 内容寻址限制了危害；分支指针可移动但宿主只 push afk 自己的分支，风险可控。
 - 已封死最高危两项：hooks（宿主代码执行）与 config（remote 篡改/凭据面）只读。
 - 未来若要求更严（如 agent 面向不可信仓库）：降级为方案 D 宿主侧提交，接口位置已预留。
+
+## 9. A7/D2 落地：容器常驻后端 + 依赖编排层安装（issue #39，已实现）
+
+> 决策 A7（每 issue 一个常驻容器）与 D2（依赖安装责任）在本切片落地，AFK 主路径三阶段迁移到容器后端。
+
+### A7 落地形态
+
+- 每 issue 一个常驻容器：`docker run -d --name afk-issue-N-slug`（entrypoint `sleep infinity`），planner → implementer → reviewer 三阶段 `docker exec` 复用同一容器，**依赖只 install 一次**。
+- 容器名由分支名 sanitize（docker 名只允许 `[a-zA-Z0-9_.-]`），创建前先 `docker rm -f` 同名残留兜底（防孤儿容器名冲突）。
+- 成功/失败都走 `try/finally` `docker rm -f` 销毁；destroy 幂等、绝不抛错（finally 安全）。
+- 阶段事件流复用共享层 `runJsonlStage`（分帧 / 解析 / 双超时 / 落盘 `.afk/sessions/` / 退出码归一），与宿主后端同一套。
+
+### D2 定案：依赖安装由编排层 hook 负责
+
+- 容器就绪后、planner 之前，编排层调 `sandbox.installDeps()`（对标 sandcastle `hooks.sandbox.onSandboxReady`）。
+- 安装命令按 worktree lockfile 自动检测：`pnpm-lock.yaml → pnpm install --frozen-lockfile`、`package-lock.json → npm ci`、`yarn.lock → yarn install --immutable`、`bun.lockb → bun install --frozen-lockfile`；`AFK_INSTALL_CMD` 可覆盖。
+- 无 lockfile → 判失败（不把安装责任推给 agent）。
+- implementer/reviewer prompt 已移除「依赖缺失时自行 pnpm install」指令，改为「依赖已由编排层装好」。

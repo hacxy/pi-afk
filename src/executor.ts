@@ -257,6 +257,114 @@ export interface Executor {
 /** spawn 工厂：默认 node:child_process spawn，测试注入假子进程 */
 export type SpawnFn = (command: string, args: string[], options: SpawnOptions) => ChildProcess
 
+/** runJsonlStage 参数：一条「spawn 命令 + 事件流消费」完整描述。 */
+export interface JsonlStageOptions {
+  command: string
+  args: string[]
+  spawnFn: SpawnFn
+  idleMs: number
+  completionMs: number
+  sessionDir: string
+}
+
+/**
+ * 共享流式执行核心（A6）：spawn 任意命令，消费 `--mode json` 事件流。
+ * - 每行 JSONL 原样落盘 <sessionDir>/<branch>-<stage>.jsonl（A13）
+ * - 终态判定 agent_settled / agent_end(willRetry=false)（A9）
+ * - 双超时：idle 无活动 / completion 宽限到期 → kill + timedOut
+ * - 退出码归一（正常 / 信号 / spawn 失败）
+ *
+ * 宿主后端（spawn pi）与容器后端（docker exec pi）共用；后端只是薄命令。
+ */
+export function runJsonlStage(
+  ctx: StageContext,
+  hooks: ExecutorHooks | undefined,
+  opts: JsonlStageOptions,
+): Promise<StageResult> {
+  const safeBranch = ctx.branch.replaceAll('/', '_')
+  const recorder = new SessionRecorder(join(opts.sessionDir, `${safeBranch}-${ctx.stage}.jsonl`))
+  const events: PiEvent[] = []
+  let sessionId: string | undefined
+  let timedOut = false
+  let settled = false
+
+  return new Promise((resolvePromise) => {
+    const child = opts.spawnFn(opts.command, opts.args, { stdio: ['ignore', 'pipe', 'pipe'] })
+
+    const finish = (exitCode: number, stderr: string): void => {
+      if (settled) return
+      settled = true
+      watchdog.stop()
+      resolvePromise({
+        exitCode,
+        sessionId,
+        stdout: assembleText(events),
+        stderr,
+        timedOut,
+        sessionFile: recorder.path,
+      })
+    }
+
+    const watchdog = new Watchdog({
+      idleMs: opts.idleMs,
+      completionMs: opts.completionMs,
+      onTimeout: () => {
+        timedOut = true
+        try {
+          child.kill('SIGTERM')
+        } catch {
+          // 进程可能已退出
+        }
+      },
+    })
+
+    const handleLine = (line: string): void => {
+      recorder.write(line)
+      const event = parseEvent(line)
+      if (!event) return
+      events.push(event)
+      hooks?.onEvent?.(event)
+      const head = parseSessionHead(event)
+      if (head) sessionId = head.id
+      if (event.type === 'message_update') {
+        const inner = (
+          event as {
+            assistantMessageEvent?: { type?: string; delta?: string }
+          }
+        ).assistantMessageEvent
+        if (inner?.type === 'text_delta' && typeof inner.delta === 'string') {
+          hooks?.onText?.(inner.delta)
+        }
+      }
+      if (isSettled(event)) watchdog.settled()
+    }
+
+    const splitter = new JsonlSplitter()
+    let stderrBuf = ''
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      watchdog.activity()
+      for (const line of splitter.feed(chunk.toString('utf8'))) handleLine(line)
+    })
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      watchdog.activity()
+      stderrBuf += stripAnsi(chunk.toString('utf8'))
+    })
+
+    child.on('error', (err) => {
+      // spawn 失败（如 pi 不存在）→ 归一退出码 1
+      finish(1, stderrBuf || String(err))
+    })
+
+    child.on('exit', (code, signal) => {
+      watchdog.activity()
+      for (const line of splitter.flush()) handleLine(line)
+      finish(normalizeExitCode(code, signal), stderrBuf)
+    })
+  })
+}
+
 export interface HostExecutorOptions {
   spawnFn?: SpawnFn
   idleMs?: number
@@ -266,10 +374,7 @@ export interface HostExecutorOptions {
 
 /**
  * 宿主后端：spawn `pi -p --mode json`，流式消费事件。
- * - 每行 JSONL 原样落盘 .afk/sessions/<branch>-<stage>.jsonl（A13）
- * - 终态判定 agent_settled / agent_end(willRetry=false)（A9）
- * - 双超时：idle 无活动 / completion 宽限到期 → kill + timedOut
- * - 退出码归一（正常 / 信号 / spawn 失败）
+ * 委托共享核心 runJsonlStage（分帧 / 解析 / 双超时 / 落盘 / 退出码归一全在共享层）。
  */
 export class HostExecutor implements Executor {
   private readonly spawnFn: SpawnFn
@@ -285,91 +390,22 @@ export class HostExecutor implements Executor {
   }
 
   runStage(ctx: StageContext, hooks?: ExecutorHooks): Promise<StageResult> {
-    const safeBranch = ctx.branch.replaceAll('/', '_')
-    const recorder = new SessionRecorder(join(this.sessionDir, `${safeBranch}-${ctx.stage}.jsonl`))
-    const events: PiEvent[] = []
-    let sessionId: string | undefined
-    let timedOut = false
-    let settled = false
-
-    return new Promise((resolvePromise) => {
-      const child = this.spawnFn(
-        'pi',
-        ['-p', '--mode', 'json', '--model', ctx.model, '--thinking', config.thinking, ctx.prompt],
-        { stdio: ['ignore', 'pipe', 'pipe'] },
-      )
-
-      const finish = (exitCode: number, stderr: string): void => {
-        if (settled) return
-        settled = true
-        watchdog.stop()
-        resolvePromise({
-          exitCode,
-          sessionId,
-          stdout: assembleText(events),
-          stderr,
-          timedOut,
-          sessionFile: recorder.path,
-        })
-      }
-
-      const watchdog = new Watchdog({
-        idleMs: this.idleMs,
-        completionMs: this.completionMs,
-        onTimeout: () => {
-          timedOut = true
-          try {
-            child.kill('SIGTERM')
-          } catch {
-            // 进程可能已退出
-          }
-        },
-      })
-
-      const handleLine = (line: string): void => {
-        recorder.write(line)
-        const event = parseEvent(line)
-        if (!event) return
-        events.push(event)
-        hooks?.onEvent?.(event)
-        const head = parseSessionHead(event)
-        if (head) sessionId = head.id
-        if (event.type === 'message_update') {
-          const inner = (
-            event as {
-              assistantMessageEvent?: { type?: string; delta?: string }
-            }
-          ).assistantMessageEvent
-          if (inner?.type === 'text_delta' && typeof inner.delta === 'string') {
-            hooks?.onText?.(inner.delta)
-          }
-        }
-        if (isSettled(event)) watchdog.settled()
-      }
-
-      const splitter = new JsonlSplitter()
-      let stderrBuf = ''
-
-      child.stdout?.on('data', (chunk: Buffer) => {
-        watchdog.activity()
-        for (const line of splitter.feed(chunk.toString('utf8'))) handleLine(line)
-      })
-
-      child.stderr?.on('data', (chunk: Buffer) => {
-        watchdog.activity()
-        stderrBuf += stripAnsi(chunk.toString('utf8'))
-      })
-
-      child.on('error', (err) => {
-        // spawn 失败（如 pi 不存在）→ 归一退出码 1
-        finish(1, stderrBuf || String(err))
-      })
-
-      child.on('exit', (code, signal) => {
-        watchdog.activity()
-        for (const line of splitter.flush()) handleLine(line)
-        finish(normalizeExitCode(code, signal), stderrBuf)
-      })
+    return runJsonlStage(ctx, hooks, {
+      command: 'pi',
+      args: [
+        '-p',
+        '--mode',
+        'json',
+        '--model',
+        ctx.model,
+        '--thinking',
+        config.thinking,
+        ctx.prompt,
+      ],
+      spawnFn: this.spawnFn,
+      idleMs: this.idleMs,
+      completionMs: this.completionMs,
+      sessionDir: this.sessionDir,
     })
   }
 }

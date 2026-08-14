@@ -6,7 +6,7 @@ import { addLabel, listTodoIssues, removeLabel } from './issues.js'
 import { log, logError } from './log.js'
 import { parsePlan, type Plan } from './plan.js'
 import { implementerPrompt, plannerPrompt, reviewerPrompt } from './prompts.js'
-import { runStage } from './sandbox.js'
+import { createSandbox, type Sandbox } from './sandbox.js'
 
 export interface IssueResult {
   issue: Issue
@@ -14,7 +14,7 @@ export interface IssueResult {
   error?: string
 }
 
-/** planner 结构化输出重试上限（zod 校验不过时重跑 planner 容器） */
+/** planner 结构化输出重试上限（zod 校验不过时在同一容器重跑 planner 阶段） */
 const PLAN_MAX_RETRIES = 2
 
 export async function runAfk(): Promise<IssueResult[]> {
@@ -59,18 +59,44 @@ export async function runAfk(): Promise<IssueResult[]> {
 async function processIssue(issue: Issue): Promise<IssueResult> {
   const branch = branchName(issue)
   let worktree: string | undefined
+  let sandbox: Sandbox | undefined
   try {
     log(`#${issue.number} 开始（${branch}）`)
     worktree = createWorktree(branch)
 
-    // Phase 1: planner —— 输出结构化 plan（zod 校验 + 重试）
-    const plan = await planPhase(issue, branch, worktree)
+    // 常驻容器：每 issue 一个，planner/implementer/reviewer 三阶段 docker exec 复用，依赖只装一次
+    sandbox = await createSandbox({
+      image: config.image,
+      worktree,
+      repoRoot: process.cwd(),
+      branch,
+      installCmd: config.installCmd,
+    })
+    // onSandboxReady hook：容器就绪即装依赖（agent 不自装，D2）
+    await sandbox.installDeps()
+
+    // Phase 1: planner —— 输出结构化 plan（zod 校验 + 重试上限）
+    const plan = await planPhase(sandbox, issue, branch, worktree)
 
     // Phase 2: implementer —— 写代码 + 验证 + 提交
-    await stage(worktree, branch, 'implementer', config.model, implementerPrompt(issue, plan))
+    await stage(
+      sandbox,
+      worktree,
+      branch,
+      'implementer',
+      config.model,
+      implementerPrompt(issue, plan),
+    )
 
     // Phase 3: reviewer —— 审查 + 直接修复 + 提交
-    await stage(worktree, branch, 'reviewer', config.reviewerModel, reviewerPrompt(issue, plan))
+    await stage(
+      sandbox,
+      worktree,
+      branch,
+      'reviewer',
+      config.reviewerModel,
+      reviewerPrompt(issue, plan),
+    )
 
     // 宿主 push 分支
     pushBranch(worktree, branch)
@@ -93,15 +119,23 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
     }
     return { issue, status: 'failed', error: message }
   } finally {
+    // 成功/失败都销毁容器（try/finally），无孤儿容器
+    if (sandbox) await sandbox.destroy()
     if (worktree) removeWorktree(worktree)
   }
 }
 
 /** planner 阶段：重跑直到拿到合法 plan（上限 PLAN_MAX_RETRIES） */
-async function planPhase(issue: Issue, branch: string, worktree: string): Promise<Plan> {
+async function planPhase(
+  sandbox: Sandbox,
+  issue: Issue,
+  branch: string,
+  worktree: string,
+): Promise<Plan> {
   let lastError = ''
   for (let attempt = 0; attempt <= PLAN_MAX_RETRIES; attempt++) {
     const result = await stage(
+      sandbox,
       worktree,
       branch,
       'planner',
@@ -118,16 +152,17 @@ async function planPhase(issue: Issue, branch: string, worktree: string): Promis
   throw new Error(`planner 重试 ${PLAN_MAX_RETRIES} 次仍无合法 plan：${lastError}`)
 }
 
-/** 跑单个阶段容器，非零退出即抛错 */
+/** 跑单个阶段：复用常驻容器（docker exec），非零退出即抛错 */
 async function stage(
+  sandbox: Sandbox,
   worktree: string,
   branch: string,
   stageName: string,
   model: string,
   prompt: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  log(`#${branch.split('/').pop()} ${stageName} 容器启动（${model}）…`)
-  const result = await runStage({ worktree, prompt, model, stage: stageName, branch })
+  log(`#${branch.split('/').pop()} ${stageName} 阶段（${model}）…`)
+  const result = await sandbox.runStage({ worktree, prompt, model, stage: stageName, branch })
   if (result.exitCode !== 0) {
     throw new Error(`${stageName} 退出码 ${result.exitCode}\nstderr: ${result.stderr.slice(-2000)}`)
   }

@@ -6,9 +6,13 @@
 # 运行时约定（由 afk 编排器负责）：
 #   -v <worktree>:/workspace            项目写穿（node_modules 用匿名卷遮蔽，勿挂宿主 node_modules）
 #   -v /workspace/node_modules          匿名卷：容器内 Linux 依赖，与宿主 macOS node_modules 隔离
+#   -v <repo>/.git:<repo>/.git          宿主 .git 同路径可写（A' 接缝：容器内 commit 可行，issue #37）
+#   -v <repo>/.git/hooks:<repo>/.git/hooks:ro   嵌套挂载覆盖为只读（宿主代码执行风险封死）
+#   -v <repo>/.git/config:<repo>/.git/config:ro 嵌套挂载覆盖为只读（remote/凭据面封死）
 #   -v <pi-home>:/home/agent/.pi        pi 配置/会话写穿宿主（可观测性）
 #   -e DEEPSEEK_API_KEY / GH_TOKEN      凭据注入（不挂宿主 auth 文件）
 #   -e GIT_AUTHOR_* / GIT_COMMITTER_*   容器内 git 提交身份
+# 依赖安装：编排层容器就绪时 docker exec 主动装（lockfile 检测，AFK_INSTALL_CMD 可覆盖），agent 不自装
 
 # 版本参数化：目标项目依赖升级时重建镜像（默认值 = 当前目标项目环境）
 ARG NODE_VERSION=22

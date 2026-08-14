@@ -10,7 +10,7 @@
 
 ## 要求
 
-1. 运行验证命令确认现状（依赖缺失先 `pnpm install --frozen-lockfile`）：
+1. 运行验证命令确认现状（依赖已由编排层装好，无需自行 install）：
    - `pnpm run typecheck`
    - `pnpm run test`
 2. 审查代码：正确性、可读性、是否只改了 issue 相关代码、是否遗漏验收标准

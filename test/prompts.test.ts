@@ -37,6 +37,13 @@ describe('prompt 不变式', () => {
     expect(p).toContain(JSON.stringify(plan, null, 2))
   })
 
+  it('implementer/reviewer 不再要求 agent 自行安装依赖（D2：编排层 hook 负责）', () => {
+    expect(implementerPrompt(issue, plan)).not.toMatch(/pnpm install/)
+    expect(reviewerPrompt(issue, plan)).not.toMatch(/pnpm install/)
+    expect(implementerPrompt(issue, plan)).toMatch(/依赖已由编排层/)
+    expect(reviewerPrompt(issue, plan)).toMatch(/依赖已由编排层/)
+  })
+
   it('reviewer prompt 无残留占位符', () => {
     const p = reviewerPrompt(issue, plan)
     assertNoPlaceholders(p)
