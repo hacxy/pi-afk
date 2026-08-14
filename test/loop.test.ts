@@ -73,10 +73,10 @@ beforeEach(() => {
   vi.clearAllMocks()
   executors = []
   vi.mocked(listTodoIssues).mockReturnValue([issue])
-  vi.mocked(branchName).mockReturnValue('afk/issue-52-site-links-nav')
+  vi.mocked(branchName).mockReturnValue('afk/issue-52')
   vi.mocked(createWorktree).mockReturnValue('/tmp/wt')
   vi.mocked(repoName).mockReturnValue('hacxy/pi-afk')
-  vi.mocked(archiveWorktree).mockReturnValue('.pi/afk/failed/afk/issue-52-site-links-nav')
+  vi.mocked(archiveWorktree).mockReturnValue('.pi/afk/failed/afk/issue-52')
   vi.mocked(currentLogFile).mockReturnValue(resolve('.pi/afk/logs/afk-test.log'))
   vi.mocked(openPr).mockReturnValue('https://github.com/hacxy/pi-afk/pull/100')
   vi.mocked(installDeps).mockResolvedValue(undefined)
@@ -106,12 +106,12 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     expect(ctx.prompt).toContain('#52')
 
     // 宿主 push 规范命名分支
-    expect(pushBranch).toHaveBeenCalledWith('/tmp/wt', 'afk/issue-52-site-links-nav')
+    expect(pushBranch).toHaveBeenCalledWith('/tmp/wt', 'afk/issue-52')
 
     // 开 PR：Closes #N + base 基线分支
     expect(openPr).toHaveBeenCalledTimes(1)
     const prOpts = vi.mocked(openPr).mock.calls[0][0]
-    expect(prOpts.branch).toBe('afk/issue-52-site-links-nav')
+    expect(prOpts.branch).toBe('afk/issue-52')
     expect(prOpts.base).toBe('main')
     expect(prOpts.title).toBe(issue.title)
     expect(prOpts.body).toContain('Closes #52')
@@ -123,15 +123,13 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     // 成功回报：分支名 + PR 链接 + compare 链接
     expect(addComment).toHaveBeenCalledTimes(1)
     const body = vi.mocked(addComment).mock.calls[0][1]
-    expect(body).toContain('afk/issue-52-site-links-nav')
+    expect(body).toContain('afk/issue-52')
     expect(body).toContain('https://github.com/hacxy/pi-afk/pull/100')
-    expect(body).toContain(
-      'https://github.com/hacxy/pi-afk/compare/main...afk/issue-52-site-links-nav',
-    )
+    expect(body).toContain('https://github.com/hacxy/pi-afk/compare/main...afk/issue-52')
 
     // 成功清理：删 worktree + 删本地分支（远程分支留给 PR）
     expect(removeWorktree).toHaveBeenCalledWith('/tmp/wt')
-    expect(deleteBranch).toHaveBeenCalledWith('afk/issue-52-site-links-nav')
+    expect(deleteBranch).toHaveBeenCalledWith('afk/issue-52')
     expect(archiveWorktree).not.toHaveBeenCalled()
   })
 
@@ -154,8 +152,8 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     expect(openPr).not.toHaveBeenCalled()
 
     // 失败现场归档 + 删本地分支（改回 todo 能干净重跑）
-    expect(archiveWorktree).toHaveBeenCalledWith('/tmp/wt', 'afk/issue-52-site-links-nav')
-    expect(deleteBranch).toHaveBeenCalledWith('afk/issue-52-site-links-nav')
+    expect(archiveWorktree).toHaveBeenCalledWith('/tmp/wt', 'afk/issue-52')
+    expect(deleteBranch).toHaveBeenCalledWith('afk/issue-52')
     expect(removeWorktree).not.toHaveBeenCalled() // 已归档，不再 remove
 
     // 失败回报：阶段 + 退出码 + stderr 摘要 + 产物路径 + 重跑提示
@@ -165,7 +163,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     expect(body).toContain('退出码：1')
     expect(body).toContain('typecheck 失败')
     expect(body).toContain('.pi/afk/logs/afk-test.log') // 日志（已相对化）
-    expect(body).toContain('.pi/afk/failed/afk/issue-52-site-links-nav') // 归档路径
+    expect(body).toContain('.pi/afk/failed/afk/issue-52') // 归档路径
     expect(body).toContain('agent:todo') // 重跑提示
 
     expect(addLabel).toHaveBeenCalledWith(52, 'agent:failed')
@@ -191,7 +189,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     const issue2: Issue = { ...issue, number: 53, title: '另一件事' }
     vi.mocked(listTodoIssues).mockReturnValue([issue, issue2])
     vi.mocked(branchName).mockImplementation((i) =>
-      i.number === 52 ? 'afk/issue-52-site-links-nav' : 'afk/issue-53-another',
+      i.number === 52 ? 'afk/issue-52' : 'afk/issue-53',
     )
     vi.mocked(createWorktree).mockImplementation((branch) => `/tmp/wt-${branch.split('-')[2]}`)
 

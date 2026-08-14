@@ -1,7 +1,7 @@
 {
   "name": "@hacxy/pi-afk",
   "version": "0.1.0",
-  "description": "AFK 无人值守循环编排器：基于 pi 的最小版 sandcastle（宿主编排 + 容器内 pi）",
+  "description": "AFK 无人值守循环编排器：基于 pi 的最小版宿主编排 + 容器内 pi",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",

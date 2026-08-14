@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
 import { config } from './config.js'
-import { slugify } from './utils.js'
 
 function git(args: string, cwd?: string): string {
   return execSync(`git ${args}`, {
@@ -13,8 +12,9 @@ function git(args: string, cwd?: string): string {
   })
 }
 
-export function branchName(issue: { number: number; title: string }): string {
-  return `${config.branchPrefix}/issue-${issue.number}-${slugify(issue.title)}`
+/** 分支名规范：只使用 issue 编号（afk/issue-N），避免非 ASCII 触发 GitHub 隐藏字符告警 */
+export function branchName(issue: { number: number }): string {
+  return `${config.branchPrefix}/issue-${issue.number}`
 }
 
 export function worktreePath(branch: string, dir: string = config.worktreesDir): string {
