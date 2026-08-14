@@ -76,9 +76,11 @@ blank / simple-loop / sequential-reviewer / parallel-planner 等（pi-afk 固定
 
 ## 四、需验证的技术隐患（实现前先验，不属"讨论"）
 
-### T1. 容器内 git commit 是否真的能工作
+### T1. 容器内 git commit 是否真的能工作（✅ 已验证，见 [decisions.md §8](./decisions.md#8-t1-技术验证容器内-git-提交issue-37已实测)）
 
 worktree 的 `.git` 是文件、内容指向**宿主**的 `.git/worktrees/<branch>`，在容器内该路径不存在。若 `git commit` 在容器里失效，则"agent 在容器内提交"这一核心前提要重新设计（如改为宿主侧 commit）。**实现切片 1 前必须先验证。**
+
+- **结论**：朴素挂载下容器内 git 全部失效；采用接缝方案 **A'**（宿主 `.git` 同路径可写挂载 + hooks/config 子挂载只读）后容器内 commit 可行，已实测。
 
 ### T2. 并发下容器/会话/资源隔离
 

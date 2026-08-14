@@ -66,3 +66,58 @@
 ## 7. 宿主技术栈（默认锁定）
 
 TypeScript + Node（ESM）；`zod` 为唯一运行时依赖；`spawn` + 手写 JSONL 分帧（不用 `readline`，规避 U+2028/2029 拆分问题）；构建 tsup、测试 vitest、包管理 pnpm。
+
+## 8. T1 技术验证：容器内 git 提交（issue #37，已实测）
+
+> 实验：真实 worktree 挂载到容器 /workspace，复刻 runStage 的挂载与身份注入（GIT_AUTHOR__/GIT_COMMITTER__），容器内跑 `git status/add/commit`。
+
+### 结论一：朴素挂载下容器内 git 全部失效
+
+只挂 worktree → `/workspace` 时，容器内 `git status / add / commit` 一律报：
+
+```
+fatal: not a git repository: /<宿主绝对路径>/.git/worktrees/<branch>
+```
+
+**根因（三层指针链，缺一层就整体失效）：**
+
+1. worktree 的 `.git` 是**文件**（非目录），内容 `gitdir: /<宿主绝对路径>/.git/worktrees/<branch>`；
+2. 该 gitdir 目录内有 `commondir: ../..`，相对解析指向宿主 `<repo>/.git`（共享 objects / refs / config）；
+3. index、HEAD、分支 ref 也全在 .git 树内。
+
+容器只挂 worktree 时 .git 树不可达，**不只 commit——任何 git 管道操作都失效**。
+
+### 结论二：采用接缝方案 A'（容器内提交可行）
+
+宿主 `.git` **同路径**挂载进容器（可写），保证 `.git` 文件、`commondir`、gitdir 指针全部可解析；hooks / config 用 **Docker 嵌套挂载**（更具体路径覆盖更宽挂载）降为只读。
+
+| 方案           | 做法                                              | 实测结果                                                                                                 |
+| -------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **A'（采用）** | `.git` 同路径可写 + hooks/config 子挂载只读       | ✅ commit 成功、宿主侧可见、宿主 push 正常、hooks/config 只读                                            |
+| A              | `.git` 整体可写、无覆盖                           | ✅ commit 成功；但 agent 可写 hooks → 宿主 push 时以宿主身份执行 agent 写的 hook（宿主代码执行风险）     |
+| B              | `.git` 只读 + 仅 objects / 分支 gitdir 可写       | ❌ commit 失败：分支 ref 在 commondir 的 `refs/heads/` 下，逃不掉可写（`fatal: cannot lock ref 'HEAD'`） |
+| D              | 宿主侧提交接缝（agent 只改文件，宿主统一 commit） | 可行（未实测）；代价是 agent 失去 status/diff/log 反馈，prompt 能力打折。A' 的降级备选                   |
+
+### 实施要点（切片 1 的 runStage）
+
+```bash
+docker run ... \
+  -v <worktree>:/workspace \
+  -v /workspace/node_modules \
+  -v <repo>/.git:<repo>/.git \
+  -v <repo>/.git/hooks:<repo>/.git/hooks:ro \
+  -v <repo>/.git/config:<repo>/.git/config:ro \
+  -e GIT_AUTHOR_NAME=... -e GIT_AUTHOR_EMAIL=... \
+  -e GIT_COMMITTER_NAME=... -e GIT_COMMITTER_EMAIL=...
+```
+
+- `<repo>` = `process.cwd()`（afk 在目标仓库根运行，`worktreesDir` 默认 `repo/.afk/worktrees`）。
+- 嵌套挂载已验证生效：容器内 `touch hooks/probe` 报 Read-only file system，`git config --add` 写失败，`git remote -v` 正常可读。
+- 对象写入 commondir `.git/objects`（内容寻址，可写风险低）；容器内 commit 的对象、ref 更新宿主立即可见，宿主 `push --dry-run` 通过。
+- 身份注入继续用 env（GIT_AUTHOR__/GIT_COMMITTER__），不依赖容器内 user.name/user.email。
+
+### 安全残留（A' 下可接受）
+
+- agent 可写：`.git/objects`、`refs/heads/*`（宿主本地分支指针）、`.git/worktrees/<branch>`、index。objects 内容寻址限制了危害；分支指针可移动但宿主只 push afk 自己的分支，风险可控。
+- 已封死最高危两项：hooks（宿主代码执行）与 config（remote 篡改/凭据面）只读。
+- 未来若要求更严（如 agent 面向不可信仓库）：降级为方案 D 宿主侧提交，接口位置已预留。
