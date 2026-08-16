@@ -13,6 +13,7 @@ import {
   cleanupStale,
   createWorktree,
   deleteBranch,
+  fetchBase,
   worktreePath,
 } from '../src/git.js'
 
@@ -59,9 +60,25 @@ afterEach(() => {
   sh(`rm -rf "${remote}"`, tmpdir())
 })
 
+describe('fetchBase（真实仓库）', () => {
+  it('返回 origin/main 当前 sha；远端推进后拿到新 sha', async () => {
+    const sha1 = await fetchBase(repo)
+    expect(sha1).toMatch(/^[0-9a-f]{40}$/)
+
+    // 远端推进后重新 fetch，应拿到新 sha
+    writeFileSync(join(repo, 'README.md'), 'v2\n')
+    sh('git add -A')
+    sh('git commit -m v2')
+    sh('git push -u origin main')
+    const sha2 = await fetchBase(repo)
+    expect(sha2).not.toBe(sha1)
+  })
+})
+
 describe('createWorktree（真实仓库）', () => {
-  it('从 origin/main 建 worktree + 本地分支', async () => {
-    const path = await createWorktree('afk/issue-1-demo', worktreesDir, repo)
+  it('从 fetchBase 拿到的基线 sha 建 worktree + 本地分支', async () => {
+    const base = await fetchBase(repo)
+    const path = await createWorktree('afk/issue-1-demo', base, worktreesDir, repo)
     expect(existsSync(path)).toBe(true)
     expect(existsSync(join(path, 'README.md'))).toBe(true)
     expect(branchExists('afk/issue-1-demo')).toBe(true)
@@ -71,7 +88,8 @@ describe('createWorktree（真实仓库）', () => {
 
 describe('deleteBranch（真实仓库）', () => {
   it('删除本地分支；分支不存在也不抛', async () => {
-    await createWorktree('afk/issue-2-demo', worktreesDir, repo)
+    const base = await fetchBase(repo)
+    await createWorktree('afk/issue-2-demo', base, worktreesDir, repo)
     const path = worktreePath('afk/issue-2-demo', worktreesDir)
     // 先注销 worktree 再删分支（分支被 worktree 占用时 branch -D 会失败）
     sh(`git worktree remove "${path}" --force`)
@@ -86,7 +104,8 @@ describe('deleteBranch（真实仓库）', () => {
 
 describe('archiveWorktree（真实仓库）', () => {
   it('把 worktree 目录搬到 failed/<branch>，注销注册，保留现场', async () => {
-    const path = await createWorktree('afk/issue-3-demo', worktreesDir, repo)
+    const base = await fetchBase(repo)
+    const path = await createWorktree('afk/issue-3-demo', base, worktreesDir, repo)
     writeFileSync(join(path, 'WIP.txt'), 'agent 写的半成品\n')
     const dest = await archiveWorktree(path, 'afk/issue-3-demo', failedDir, repo)
 
@@ -109,8 +128,9 @@ describe('archiveWorktree（真实仓库）', () => {
 
 describe('cleanupStale + 干净重跑（真实仓库）', () => {
   it('残留 worktree + 分支时，再次 createWorktree 能清理干净并成功重跑', async () => {
+    const base = await fetchBase(repo)
     // 第一次跑：建 worktree + 分支（模拟上次跑完后残留——未删分支/worktree）
-    const first = await createWorktree('afk/issue-4-demo', worktreesDir, repo)
+    const first = await createWorktree('afk/issue-4-demo', base, worktreesDir, repo)
     writeFileSync(join(first, 'attempt1.txt'), '1')
     expect(branchExists('afk/issue-4-demo')).toBe(true)
 
@@ -120,7 +140,7 @@ describe('cleanupStale + 干净重跑（真实仓库）', () => {
     expect(branchExists('afk/issue-4-demo')).toBe(false)
 
     // 重跑：createWorktree 内部先 cleanupStale，不被残留卡住
-    const second = await createWorktree('afk/issue-4-demo', worktreesDir, repo)
+    const second = await createWorktree('afk/issue-4-demo', base, worktreesDir, repo)
     expect(existsSync(second)).toBe(true)
     expect(branchExists('afk/issue-4-demo')).toBe(true)
     expect(existsSync(join(second, 'attempt1.txt'))).toBe(false) // 从 origin/main 全新重建

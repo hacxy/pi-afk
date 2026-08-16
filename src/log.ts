@@ -7,20 +7,24 @@ import { config } from './config.js'
 export interface IssueLogger {
   log(msg: string): void
   logError(msg: string): void
+  /** agent 正文增量（delta 碎片，行缓冲后落盘，不进终端） */
+  logAgent(chunk: string): void
+  /** 阶段结束冲刷残留半行 */
+  flushAgent(): void
   /** 日志文件绝对路径（失败 comment 产物路径用） */
   file: string
 }
 
 const stamp = () => new Date().toLocaleTimeString('zh-CN')
 
-/** 运行级日志（仅终端，不落盘）：启动 / 汇总 / 崩溃 / 拉取失败 */
+/** 运行级日志（仅终端，不落盘）：启动 / 汇总 / 崩溃 / 拉取失败，[afk] 标记区分层级 */
 export function log(msg: string): void {
   // eslint-disable-next-line no-console -- 主日志输出，日志模块本身职责
-  console.log(`[${stamp()}] ${msg}`)
+  console.log(`[${stamp()}] [afk] ${msg}`)
 }
 
 export function logError(msg: string): void {
-  console.error(`[${stamp()}] ✗ ${msg}`)
+  console.error(`[${stamp()}] [afk] ✗ ${msg}`)
 }
 
 /**
@@ -30,18 +34,34 @@ export function logError(msg: string): void {
  */
 export function beginIssueLog(number: number): IssueLogger {
   const file = resolve(config.logsDir, `issue-${number}.log`)
+  let agentBuf = ''
   const logger: IssueLogger = {
     file,
     log(msg) {
-      const line = `[${stamp()}] ${msg}`
+      const line = `[${stamp()}] [#${number}] ${msg}`
       // eslint-disable-next-line no-console -- 主日志输出，日志模块本身职责
       console.log(line)
       append(file, line)
     },
     logError(msg) {
-      const line = `[${stamp()}] ✗ ${msg}`
+      const line = `[${stamp()}] [#${number}] ✗ ${msg}`
       console.error(line)
       append(file, line)
+    },
+    logAgent(chunk) {
+      agentBuf += chunk
+      let idx: number
+      while ((idx = agentBuf.indexOf('\n')) !== -1) {
+        const line = agentBuf.slice(0, idx)
+        agentBuf = agentBuf.slice(idx + 1)
+        if (line.length > 0) append(file, line)
+      }
+    },
+    flushAgent() {
+      if (agentBuf.length > 0) {
+        append(file, agentBuf)
+        agentBuf = ''
+      }
     },
   }
   try {

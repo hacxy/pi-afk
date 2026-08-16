@@ -12,6 +12,7 @@ vi.mock('../src/git.js', () => ({
   branchName: vi.fn(),
   createWorktree: vi.fn(),
   deleteBranch: vi.fn(),
+  fetchBase: vi.fn(),
   pushBranch: vi.fn(),
   removeWorktree: vi.fn(),
 }))
@@ -31,6 +32,7 @@ import {
   branchName,
   createWorktree,
   deleteBranch,
+  fetchBase,
   pushBranch,
   removeWorktree,
 } from '../src/git.js'
@@ -51,6 +53,8 @@ const issue: Issue = {
   body: '导航链接有背景色，需要去掉。',
   labels: ['agent:todo'],
 }
+
+const BASE_SHA = '1db529b480283a4d1c8d1bc9422962fbe950492e'
 
 function okResult(stdout = ''): {
   exitCode: number
@@ -74,12 +78,15 @@ beforeEach(() => {
   executors = []
   vi.mocked(listTodoIssues).mockReturnValue([issue])
   vi.mocked(branchName).mockReturnValue('afk/issue-52')
+  vi.mocked(fetchBase).mockResolvedValue(BASE_SHA)
   vi.mocked(createWorktree).mockReturnValue('/tmp/wt')
   vi.mocked(repoName).mockReturnValue('hacxy/pi-afk')
   vi.mocked(archiveWorktree).mockReturnValue('.pi/afk/failed/afk/issue-52')
   vi.mocked(beginIssueLog).mockImplementation((n) => ({
     log: vi.fn(),
     logError: vi.fn(),
+    logAgent: vi.fn(),
+    flushAgent: vi.fn(),
     file: resolve(`.pi/afk/logs/issue-${n}.log`),
   }))
   vi.mocked(openPr).mockReturnValue('https://github.com/hacxy/pi-afk/pull/100')
@@ -95,6 +102,10 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
   it('成功：worktree → 宿主装依赖 → 单阶段 implementer → push → 开 PR → done label + comment + 清理', async () => {
     const results = await runAfk()
     expect(results[0].status).toBe('done')
+
+    // 基线每迭代只 fetch 一次（串行），批内不再各自 fetch；sha 传入 worktree 创建
+    expect(fetchBase).toHaveBeenCalledTimes(1)
+    expect(createWorktree).toHaveBeenCalledWith('afk/issue-52', BASE_SHA)
 
     // 宿主侧装依赖（编排层负责，agent 不自装），在 worktree 里执行
     expect(installDeps).toHaveBeenCalledTimes(1)
@@ -201,6 +212,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     expect(results).toHaveLength(2)
     expect(results.every((r) => r.status === 'done')).toBe(true)
 
+    expect(fetchBase).toHaveBeenCalledTimes(1) // 批内并发但只 fetch 一次
     expect(installDeps).toHaveBeenCalledTimes(2)
     expect(openPr).toHaveBeenCalledTimes(2)
     expect(executors).toHaveLength(2)
@@ -240,6 +252,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
 
     expect(results).toHaveLength(3)
     expect(results.every((r) => r.status === 'done')).toBe(true)
+    expect(fetchBase).toHaveBeenCalledTimes(2) // 前两迭代各 fetch 一次；第三迭代无待办提前 break，不 fetch
     expect(listTodoIssues).toHaveBeenCalledTimes(3) // 每迭代重拉
     expect(openPr).toHaveBeenCalledTimes(3)
     expect(executors).toHaveLength(3)
@@ -266,5 +279,16 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     expect(results).toHaveLength(1)
     expect(listTodoIssues).toHaveBeenCalledTimes(2) // 第二次拉到 seen 内 → 终止
     expect(openPr).toHaveBeenCalledTimes(1)
+  })
+
+  it('fetch 基线失败：中止本轮，不建 worktree、不跑 implementer、不开 PR', async () => {
+    vi.mocked(fetchBase).mockRejectedValue(new Error('fetch origin main 失败'))
+
+    const results = await runAfk()
+
+    expect(results).toHaveLength(0)
+    expect(createWorktree).not.toHaveBeenCalled()
+    expect(executors).toHaveLength(0)
+    expect(openPr).not.toHaveBeenCalled()
   })
 })

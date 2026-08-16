@@ -51,20 +51,31 @@ export async function cleanupStale(
 }
 
 /**
- * 为 issue 建独立 worktree（基线 = 最新 origin/<base>）。
+ * 基线刷新：fetch origin/<base> 一次，返回最新基线 sha。
+ * 必须在迭代层串行调用（批内并发 issue 共享基线），不要在批内每 issue 各自 fetch——
+ * 同仓库并发 `git fetch` 会撞 ref 事务锁（cannot lock ref ... is at X but expected Y），
+ * 即 #74 的 git 阶段报错。
+ */
+export async function fetchBase(repoRoot: string = process.cwd()): Promise<string> {
+  await git(['fetch', 'origin', config.baseBranch], repoRoot)
+  return (await git(['rev-parse', `origin/${config.baseBranch}`], repoRoot)).trim()
+}
+
+/**
+ * 为 issue 建独立 worktree（基线 = 传入的 baseSha，已由迭代层 fetchBase 一次拉到本地）。
  * 每个 issue 一个 worktree，planner/implementer/reviewer 三阶段顺序共用（代码累积）。
  * 建之前先 cleanupStale，保证残留分支/worktree 不会卡住重跑。
  */
 export async function createWorktree(
   branch: string,
+  baseSha: string,
   dir: string = config.worktreesDir,
   repoRoot: string = process.cwd(),
 ): Promise<string> {
   const path = worktreePath(branch, dir)
   mkdirSync(resolve(dir), { recursive: true })
   await cleanupStale(branch, dir, repoRoot)
-  await git(['fetch', 'origin', config.baseBranch], repoRoot)
-  await git(['worktree', 'add', path, '-b', branch, `origin/${config.baseBranch}`], repoRoot)
+  await git(['worktree', 'add', path, '-b', branch, baseSha], repoRoot)
   return path
 }
 

@@ -4,12 +4,13 @@ import { isAbsolute, relative } from 'node:path'
 import pMap from 'p-map'
 
 import { config } from './config.js'
-import { HostExecutor } from './executor.js'
+import { HostExecutor, type StageResult } from './executor.js'
 import {
   archiveWorktree,
   branchName,
   createWorktree,
   deleteBranch,
+  fetchBase,
   pushBranch,
   removeWorktree,
 } from './git.js'
@@ -49,6 +50,9 @@ function reportPath(p: string | undefined): string | undefined {
   return rel.startsWith('..') ? p : rel
 }
 
+/** 心跳间隔：长 implementer 静默期终端仍有「还在跑」信号（宿主 timer，与 watchdog 无关） */
+const HEARTBEAT_MS = 60_000
+
 /**
  * 无人值守循环（模型 A：迭代 = 一批并发任务）：
  * 每次迭代原子拉取一批（≤ maxParallel 个）待处理 issue 并批内并发处理到终态，
@@ -79,6 +83,16 @@ export async function runAfk(maxIterations = 1): Promise<IssueResult[]> {
       break
     }
 
+    // 基线每迭代只 fetch 一次（串行）：批内并发 issue 不再各自 fetch origin/main，
+    // 消除同仓库并发 fetch 撞 ref 事务锁的竞态（issue #74）；失败 = 宿主级故障，中止本轮
+    let baseSha: string
+    try {
+      baseSha = await fetchBase()
+    } catch (error) {
+      logError(`fetch 基线失败：${error instanceof Error ? error.message : error}`)
+      break
+    }
+
     // 一次迭代 = 一批（≤ maxParallel 个）并发处理到终态
     const batch = fresh.slice(0, config.maxParallel)
     for (const i of batch) seen.add(i.number)
@@ -91,7 +105,7 @@ export async function runAfk(maxIterations = 1): Promise<IssueResult[]> {
       batch,
       async (issue): Promise<IssueResult> => {
         try {
-          return await processIssue(issue)
+          return await processIssue(issue, baseSha)
         } catch (error) {
           logError(`#${issue.number} 处理异常：${error instanceof Error ? error.message : error}`)
           return { issue, status: 'failed', error: String(error) }
@@ -104,15 +118,15 @@ export async function runAfk(maxIterations = 1): Promise<IssueResult[]> {
   return results
 }
 
-async function processIssue(issue: Issue): Promise<IssueResult> {
+async function processIssue(issue: Issue, baseSha: string): Promise<IssueResult> {
   const logger = beginIssueLog(issue.number)
   const branch = branchName(issue)
   let worktree: string | undefined
   let worktreeArchived = false
   let currentStage = 'git'
   try {
-    logger.log(`#${issue.number} 开始（${branch}）`)
-    worktree = await createWorktree(branch)
+    logger.log(`开始（${branch}）`)
+    worktree = await createWorktree(branch, baseSha)
 
     // 宿主侧装依赖（编排层负责，agent 不自装）
     currentStage = 'install'
@@ -125,7 +139,7 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
     // 宿主 push 分支
     currentStage = 'push'
     await pushBranch(worktree, branch)
-    logger.log(`#${issue.number} 已 push → origin/${branch}`)
+    logger.log(`已 push → origin/${branch}`)
 
     // 开 PR（body 带 Closes #N，人工 merge 时 GitHub 自动关 issue）
     currentStage = 'pr'
@@ -135,7 +149,7 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
       title: issue.title,
       body: prBody(issue),
     })
-    logger.log(`#${issue.number} PR 已开 → ${prUrl}`)
+    logger.log(`PR 已开 → ${prUrl}`)
 
     // 成功回报 + label 状态机：todo → done
     await tryReport(
@@ -149,24 +163,16 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
             compareUrl: compareUrl(await repoName(), config.baseBranch, branch),
           }),
         ),
-      `#${issue.number} 成功回报`,
+      `成功回报`,
     )
-    await tryReport(
-      logger,
-      () => addLabel(issue.number, config.doneLabel),
-      `#${issue.number} 加 done label`,
-    )
-    await tryReport(
-      logger,
-      () => removeLabel(issue.number, config.todoLabel),
-      `#${issue.number} 移除 todo label`,
-    )
-    logger.log(`#${issue.number} 完成 ✓（label: ${config.todoLabel} → ${config.doneLabel}）`)
+    await tryReport(logger, () => addLabel(issue.number, config.doneLabel), `加 done label`)
+    await tryReport(logger, () => removeLabel(issue.number, config.todoLabel), `移除 todo label`)
+    logger.log(`完成 ✓（label: ${config.todoLabel} → ${config.doneLabel}）`)
     return { issue, status: 'done' }
   } catch (error) {
     const info = failureInfo(error, currentStage)
     const message = error instanceof Error ? error.message : String(error)
-    logger.logError(`#${issue.number} 失败：${message}`)
+    logger.logError(`失败：${message}`)
 
     // 失败现场归档 + 删本地分支（改回 todo 重跑不被残留卡住）
     const archivePath = worktree ? await archiveWorktree(worktree, branch) : undefined
@@ -190,20 +196,12 @@ async function processIssue(issue: Issue): Promise<IssueResult> {
             todoLabel: config.todoLabel,
           }),
         ),
-      `#${issue.number} 失败回报`,
+      `失败回报`,
     )
 
     // label 状态机：todo → failed（手动重置回 todo 才会重跑）
-    await tryReport(
-      logger,
-      () => addLabel(issue.number, config.failedLabel),
-      `#${issue.number} 加 failed label`,
-    )
-    await tryReport(
-      logger,
-      () => removeLabel(issue.number, config.todoLabel),
-      `#${issue.number} 移除 todo label`,
-    )
+    await tryReport(logger, () => addLabel(issue.number, config.failedLabel), `加 failed label`)
+    await tryReport(logger, () => removeLabel(issue.number, config.todoLabel), `移除 todo label`)
     return { issue, status: 'failed', error: message }
   } finally {
     // 成功路径：删 worktree + 删本地分支（远程分支留给 PR）；失败路径已在 catch 归档并删分支
@@ -260,8 +258,9 @@ function failureInfo(
 }
 
 /**
- * 单阶段 implementer：宿主 spawn pi，实时透传，非零退出抛带结构的 StageFailure。
- * 关键信息（A14）：阶段结束 + 退出码 + 耗时 + 超时 + session id 记入 issue 日志；
+ * 单阶段 implementer：宿主 spawn pi，agent 正文增量落盘 issue 日志（不进终端），
+ * 非零退出抛带结构的 StageFailure。
+ * 关键信息：开场打 log 路径（可 tail）、心跳、阶段结束 + 退出码 + 耗时 + 输出量 + 超时 + session id；
  * agent 完整事件流留在 session 文件，不重复落盘。
  */
 async function implementerPhase(
@@ -270,21 +269,33 @@ async function implementerPhase(
   issue: Issue,
   logger: IssueLogger,
 ): Promise<void> {
-  logger.log(`#${branch.split('/').pop()} implementer 阶段（${config.model}）…`)
+  logger.log(`implementer 阶段（${config.model}）… log: ${reportPath(logger.file)}`)
   const startedAt = Date.now()
-  const result = await new HostExecutor().runStage(
-    {
-      prompt: implementerPrompt(issue, branch),
-      model: config.model,
-      stage: 'implementer',
-      branch,
-      cwd: worktree,
-    },
-    { onText: (delta) => process.stdout.write(delta) },
-  )
+  // 心跳：长 implementer 静默期终端仍有「还在跑」信号（宿主 timer，与 watchdog 无关）
+  const heartbeat = setInterval(() => {
+    logger.log(`implementer 运行中 ${Math.round((Date.now() - startedAt) / 1000)}s…`)
+  }, HEARTBEAT_MS)
+  let result: StageResult
+  try {
+    result = await new HostExecutor().runStage(
+      {
+        prompt: implementerPrompt(issue, branch),
+        model: config.model,
+        stage: 'implementer',
+        branch,
+        cwd: worktree,
+      },
+      // B 方案：agent 正文不进终端，增量落盘 issue log（行缓冲，完整行才写）
+      { onText: (delta) => logger.logAgent(delta) },
+    )
+  } finally {
+    clearInterval(heartbeat)
+    logger.flushAgent()
+  }
   const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1)
+  const outputKb = (Buffer.byteLength(result.stdout, 'utf8') / 1024).toFixed(0)
   logger.log(
-    `implementer 结束：退出码 ${result.exitCode}${result.timedOut ? '（超时）' : ''}，耗时 ${durationSec}s`,
+    `implementer 结束：退出码 ${result.exitCode}${result.timedOut ? '（超时）' : ''}，耗时 ${durationSec}s，输出 ${outputKb}KB`,
   )
   if (result.sessionId) logger.log(`session: ${result.sessionId}`)
   if (result.exitCode !== 0) {
