@@ -8,6 +8,10 @@ export interface SuccessInfo {
   branch: string
   prUrl: string
   compareUrl: string
+  /** 已合并到 base（autoMerge=true 且合并成功） */
+  merged?: boolean
+  /** review 轮数（1-based） */
+  reviewRounds?: number
 }
 
 export interface FailureInfo {
@@ -34,15 +38,17 @@ export function compareUrl(repo: string, base: string, branch: string): string {
   return `https://github.com/${repo}/compare/${base}...${branch}`
 }
 
-/** 成功回报：分支名 + PR 链接 + compare 链接 */
+/** 成功回报：分支名 + PR 链接 + compare 链接（可选：已合并 / review 轮数） */
 export function successComment(info: SuccessInfo): string {
-  return [
-    '✅ afk 完成',
+  const lines = [`✅ afk 完成${info.merged ? '（review 通过，已合并）' : ''}`]
+  if (info.reviewRounds) lines.push('', `- review：${info.reviewRounds} 轮通过`)
+  lines.push(
     '',
     `- 分支：\`${info.branch}\``,
-    `- PR：${info.prUrl}`,
+    `- PR：${info.prUrl}${info.merged ? '（已合并）' : '（待人工 merge）'}`,
     `- compare：${info.compareUrl}`,
-  ].join('\n')
+  )
+  return lines.join('\n')
 }
 
 /** 失败回报：阶段 + 退出码 + stderr 摘要 + 产物路径 + 重跑提示 */

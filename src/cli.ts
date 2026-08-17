@@ -68,7 +68,7 @@ function main(): void {
   cli
     .command(
       '[maxIterations]',
-      '无人值守循环：拉 agent:todo issue → 宿主单阶段 implementer → push → 开 PR（迭代 maxIterations 次，每次并发处理至多 maxParallel 个，默认 1）',
+      '无人值守循环：拉 agent:todo issue → implementer → push → 开 PR → codereview（≤ maxReviewRounds 轮）→ autoMerge 时串行合并 PR（含冲突化解），迭代 maxIterations 次，每次并发至多 maxParallel 个，默认 1',
     )
     .action(async (maxIterations?: string) => {
       try {

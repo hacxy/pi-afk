@@ -11,18 +11,37 @@ describe('compareUrl', () => {
 })
 
 describe('successComment', () => {
+  const base = {
+    branch: 'afk/issue-52-site-links-nav',
+    prUrl: 'https://github.com/hacxy/pi-afk/pull/100',
+    compareUrl: 'https://github.com/hacxy/pi-afk/compare/main...afk/issue-52-site-links-nav',
+  }
+
   it('包含分支名、PR 链接与 compare 链接', () => {
-    const body = successComment({
-      branch: 'afk/issue-52-site-links-nav',
-      prUrl: 'https://github.com/hacxy/pi-afk/pull/100',
-      compareUrl: 'https://github.com/hacxy/pi-afk/compare/main...afk/issue-52-site-links-nav',
-    })
+    const body = successComment(base)
     expect(body).toContain('afk/issue-52-site-links-nav')
     expect(body).toContain('https://github.com/hacxy/pi-afk/pull/100')
     expect(body).toContain(
       'https://github.com/hacxy/pi-afk/compare/main...afk/issue-52-site-links-nav',
     )
     expect(body).toContain('✅')
+  })
+
+  it('未合并（autoMerge=false）：标注待人工 merge', () => {
+    const body = successComment(base)
+    expect(body).toContain('待人工 merge')
+    expect(body).not.toContain('已合并')
+  })
+
+  it('已合并（autoMerge=true）：标注已合并，不带待人工', () => {
+    const body = successComment({ ...base, merged: true })
+    expect(body).toContain('已合并')
+    expect(body).not.toContain('待人工 merge')
+  })
+
+  it('review 轮数渲染', () => {
+    const body = successComment({ ...base, reviewRounds: 2 })
+    expect(body).toContain('review：2 轮通过')
   })
 })
 

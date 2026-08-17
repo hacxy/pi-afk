@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { implementerPrompt } from '../src/prompts.js'
+import {
+  implementerFixPrompt,
+  implementerPrompt,
+  mergerPrompt,
+  reviewerPrompt,
+} from '../src/prompts.js'
 
 const issue = {
   number: 52,
@@ -32,5 +37,43 @@ describe('implementer prompt（单阶段）', () => {
 
   it('不残留 {{PLAN}} 占位（planner 已砍，单阶段自主规划）', () => {
     expect(implementerPrompt(issue, branch)).not.toContain('{{PLAN}}')
+  })
+})
+
+describe('reviewer prompt（codereview）', () => {
+  it('无残留占位符，含 issue、分支与 base 分支', () => {
+    const p = reviewerPrompt(issue, branch, 'main')
+    assertNoPlaceholders(p)
+    expect(p).toContain('#52')
+    expect(p).toContain(branch)
+    expect(p).toContain('main')
+    expect(p).toContain('<verdict>')
+    expect(p).toContain('approve')
+  })
+})
+
+describe('implementerFixPrompt（review 修复轮）', () => {
+  it('无残留占位符，含 issue 与 review 反馈', () => {
+    const p = implementerFixPrompt(issue, branch, '1. src/a.ts: 空指针风险')
+    assertNoPlaceholders(p)
+    expect(p).toContain('#52')
+    expect(p).toContain('空指针风险')
+  })
+})
+
+describe('mergerPrompt（合并 PR，解冲突是核心职责）', () => {
+  it('无残留占位符，含冲突文件清单与 base 分支', () => {
+    const p = mergerPrompt(issue, branch, 'main', ['src/a.ts', 'src/b.ts'])
+    assertNoPlaceholders(p)
+    expect(p).toContain('main')
+    expect(p).toContain('src/a.ts')
+    expect(p).toContain('src/b.ts')
+    expect(p).toContain('Issue #52')
+  })
+
+  it('无冲突文件时给 git status 提示（不残留占位符）', () => {
+    const p = mergerPrompt(issue, branch, 'main', [])
+    assertNoPlaceholders(p)
+    expect(p).toContain('git status')
   })
 })

@@ -22,6 +22,13 @@ const ENV_KEYS = [
   'AFK_INSTALL_CMD',
   'AFK_IDLE_TIMEOUT_SEC',
   'AFK_COMPLETION_TIMEOUT_SEC',
+  'AFK_AUTO_MERGE',
+  'AFK_MERGED_LABEL',
+  'AFK_REVIEWER_MODEL',
+  'AFK_MAX_REVIEW_ROUNDS',
+  'AFK_CONFLICT_TRIES',
+  'AFK_WAIT_FOR_CHECKS',
+  'AFK_MERGE_TIMEOUT_SEC',
 ] as const
 
 const ORIGINAL = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
@@ -80,10 +87,17 @@ describe('loadConfig 加载与校验', () => {
       sessionsDir: '.pi/afk/sessions',
       idleTimeoutSec: 600,
       completionTimeoutSec: 60,
+      autoMerge: false,
+      mergedLabel: 'agent:merged',
+      maxReviewRounds: 2,
+      conflictTries: 2,
+      waitForChecks: true,
+      mergeTimeoutSec: 600,
     })
     expect(cfg.installCmd).toBeUndefined()
     expect(cfg.gitAuthor).toBeUndefined()
     expect(cfg.gitEmail).toBeUndefined()
+    expect(cfg.reviewerModel).toBeUndefined()
   })
 
   it('部分键 → 其余回落内置默认值', () => {
@@ -173,5 +187,56 @@ describe('loadConfig 加载与校验', () => {
     const cfg = loadConfig(cwd)
     expect(cfg.gitAuthor).toBe('hacxy')
     expect(cfg.gitEmail).toBe('hacxy@example.com')
+  })
+
+  it('完整流程新键：config.json 解析 + env 覆盖（布尔/数字/可选）', () => {
+    const cwd = tempCwd()
+    writeConfig(cwd, {
+      autoMerge: true,
+      mergedLabel: 'done',
+      reviewerModel: 'reviewer-model',
+      maxReviewRounds: 3,
+      conflictTries: 5,
+      waitForChecks: false,
+      mergeTimeoutSec: 120,
+    })
+
+    const cfg = loadConfig(cwd)
+    expect(cfg.autoMerge).toBe(true)
+    expect(cfg.mergedLabel).toBe('done')
+    expect(cfg.reviewerModel).toBe('reviewer-model')
+    expect(cfg.maxReviewRounds).toBe(3)
+    expect(cfg.conflictTries).toBe(5)
+    expect(cfg.waitForChecks).toBe(false)
+    expect(cfg.mergeTimeoutSec).toBe(120)
+
+    // env 覆盖：布尔 'true'/'false' 转类型，数字转 Number
+    process.env.AFK_AUTO_MERGE = 'true'
+    process.env.AFK_WAIT_FOR_CHECKS = 'false'
+    process.env.AFK_MAX_REVIEW_ROUNDS = '4'
+    process.env.AFK_MERGED_LABEL = 'merged'
+    process.env.AFK_CONFLICT_TRIES = '3'
+    process.env.AFK_MERGE_TIMEOUT_SEC = '900'
+    const overridden = loadConfig(cwd)
+    expect(overridden.autoMerge).toBe(true)
+    expect(overridden.waitForChecks).toBe(false)
+    expect(overridden.maxReviewRounds).toBe(4)
+    expect(overridden.mergedLabel).toBe('merged')
+    expect(overridden.conflictTries).toBe(3)
+    expect(overridden.mergeTimeoutSec).toBe(900)
+  })
+
+  it('布尔 env 非法值（非 true/false）→ 报错并定位键名', () => {
+    const cwd = tempCwd()
+    writeConfig(cwd, {})
+    process.env.AFK_AUTO_MERGE = 'yes'
+
+    expect(() => loadConfig(cwd)).toThrow(/autoMerge/)
+  })
+
+  it('完整流程新键非法值 → 报错并定位键名', () => {
+    const cwd = tempCwd()
+    writeConfig(cwd, { maxReviewRounds: 0 })
+    expect(() => loadConfig(cwd)).toThrow(/maxReviewRounds/)
   })
 })

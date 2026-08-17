@@ -25,3 +25,31 @@ const issueVars = (issue: Issue, branch: string) => ({
 export function implementerPrompt(issue: Issue, branch: string): string {
   return render(load('implementer.md'), issueVars(issue, branch))
 }
+
+/** review agent prompt：审 diff base...HEAD，输出 <verdict> 结构化结论 */
+export function reviewerPrompt(issue: Issue, branch: string, baseBranch: string): string {
+  return render(load('reviewer.md'), { ...issueVars(issue, branch), BASE_BRANCH: baseBranch })
+}
+
+/** 修复轮 implementer prompt：原 issue + review 问题清单 */
+export function implementerFixPrompt(issue: Issue, branch: string, feedback: string): string {
+  return render(load('fixer.md'), { ...issueVars(issue, branch), REVIEW_FEEDBACK: feedback })
+}
+
+/** merger agent prompt：合并 PR（解冲突是核心职责之一），带冲突文件清单 */
+export function mergerPrompt(
+  issue: Issue,
+  branch: string,
+  baseBranch: string,
+  files: string[],
+): string {
+  const conflicted =
+    files.length > 0
+      ? files.map((f) => `- \`${f}\``).join('\n')
+      : '（未检测到，以 git status 为准）'
+  return render(load('merger.md'), {
+    ...issueVars(issue, branch),
+    BASE_BRANCH: baseBranch,
+    CONFLICTED_FILES: conflicted,
+  })
+}

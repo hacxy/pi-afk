@@ -8,16 +8,29 @@ import { HostExecutor, type StageResult } from './executor.js'
 import {
   archiveWorktree,
   branchName,
+  conflictedFiles,
   createWorktree,
   deleteBranch,
   fetchBase,
+  hasRemoteBranch,
+  mergeBaseIntoBranch,
   pushBranch,
   removeWorktree,
 } from './git.js'
 import { installDeps } from './install.js'
-import { addComment, addLabel, listTodoIssues, openPr, removeLabel, repoName } from './issues.js'
+import {
+  addComment,
+  addLabel,
+  listTodoIssues,
+  mergePr,
+  openPr,
+  prComment,
+  removeLabel,
+  repoName,
+  waitForChecksPass,
+} from './issues.js'
 import { beginIssueLog, log, logError, type IssueLogger } from './log.js'
-import { implementerPrompt } from './prompts.js'
+import { implementerFixPrompt, implementerPrompt, mergerPrompt, reviewerPrompt } from './prompts.js'
 import { compareUrl, failureComment, successComment } from './report.js'
 
 export interface IssueResult {
@@ -54,6 +67,23 @@ function reportPath(p: string | undefined): string | undefined {
 const HEARTBEAT_MS = 60_000
 
 /**
+ * merge 串行队列（Q8）：批内并发 issue 的合并阶段共享同一队列，一次一个。
+ * 前一个失败（reject）不影响后续排队任务（tail 用 .then(fn, fn) 接力）。
+ */
+class MergeQueue {
+  private tail: Promise<unknown> = Promise.resolve()
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.tail.then(fn, fn)
+    this.tail = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    return next
+  }
+}
+
+/**
  * 无人值守循环（模型 A：迭代 = 一批并发任务）：
  * 每次迭代原子拉取一批（≤ maxParallel 个）待处理 issue 并批内并发处理到终态，
  * 共迭代 maxIterations 次（默认 1）；批间重拉天然推进（已完成 issue 的 label 已
@@ -64,6 +94,7 @@ export async function runAfk(config: Config, maxIterations = 1): Promise<IssueRe
   const iterations = Math.max(1, Math.floor(maxIterations))
   const results: IssueResult[] = []
   const seen = new Set<number>()
+  const mergeQueue = new MergeQueue()
 
   for (let iter = 0; iter < iterations; iter++) {
     let issues: Issue[]
@@ -105,7 +136,7 @@ export async function runAfk(config: Config, maxIterations = 1): Promise<IssueRe
       batch,
       async (issue): Promise<IssueResult> => {
         try {
-          return await processIssue(config, issue, baseSha)
+          return await processIssue(config, issue, baseSha, mergeQueue)
         } catch (error) {
           logError(`#${issue.number} 处理异常：${error instanceof Error ? error.message : error}`)
           return { issue, status: 'failed', error: String(error) }
@@ -118,7 +149,12 @@ export async function runAfk(config: Config, maxIterations = 1): Promise<IssueRe
   return results
 }
 
-async function processIssue(config: Config, issue: Issue, baseSha: string): Promise<IssueResult> {
+async function processIssue(
+  config: Config,
+  issue: Issue,
+  baseSha: string,
+  mergeQueue: MergeQueue,
+): Promise<IssueResult> {
   const logger = beginIssueLog(issue.number, config.logsDir)
   const branch = branchName(config, issue)
   let worktree: string | undefined
@@ -136,12 +172,12 @@ async function processIssue(config: Config, issue: Issue, baseSha: string): Prom
     currentStage = 'implementer'
     await implementerPhase(config, worktree, branch, issue, logger)
 
-    // 宿主 push 分支
+    // 宿主 push 分支（重跑场景远端有残留 → force-with-lease 覆盖，Q7）
     currentStage = 'push'
-    await pushBranch(worktree, branch)
+    await pushBranch(worktree, branch, { force: await hasRemoteBranch(branch) })
     logger.log(`已 push → origin/${branch}`)
 
-    // 开 PR（body 带 Closes #N，人工 merge 时 GitHub 自动关 issue）
+    // 开 PR（body 带 Closes #N，合并时 GitHub 自动关 issue）
     currentStage = 'pr'
     const prUrl = await openPr({
       branch,
@@ -150,6 +186,23 @@ async function processIssue(config: Config, issue: Issue, baseSha: string): Prom
       body: prBody(issue),
     })
     logger.log(`PR 已开 → ${prUrl}`)
+
+    // codereview：同一 worktree、新会话，review 循环（≤ maxReviewRounds 轮）
+    currentStage = 'review'
+    const reviewRounds = await reviewLoop(config, worktree, branch, issue, logger)
+    logger.log(`review ${reviewRounds} 轮通过`)
+
+    // 合并 PR（autoMerge opt-in；宿主串行队列内 fetch 最新 base + 化解冲突）
+    let merged = false
+    if (config.autoMerge) {
+      currentStage = 'merge'
+      // 闭包内 worktree 被悲观收窄为 string | undefined，先拷贝为确定值
+      const wt = worktree
+      await mergeQueue.run(() => mergePhase(config, wt, branch, issue, logger))
+      merged = true
+      logger.log(`已合并 → ${prUrl}`)
+      await tryReport(logger, () => addLabel(issue.number, config.mergedLabel), `加 merged label`)
+    }
 
     // 成功回报 + label 状态机：todo → done
     await tryReport(
@@ -161,6 +214,8 @@ async function processIssue(config: Config, issue: Issue, baseSha: string): Prom
             branch,
             prUrl,
             compareUrl: compareUrl(await repoName(), config.baseBranch, branch),
+            merged,
+            reviewRounds,
           }),
         ),
       `成功回报`,
@@ -258,31 +313,32 @@ function failureInfo(
 }
 
 /**
- * 单阶段 implementer：宿主 spawn pi，agent 正文增量落盘 issue 日志（不进终端），
- * 非零退出抛带结构的 StageFailure。
- * 关键信息：开场打 log 路径（可 tail）、心跳、阶段结束 + 退出码 + 耗时 + 输出量 + 超时 + session id；
- * agent 完整事件流留在 session 文件，不重复落盘。
+ * 通用 agent 阶段（implementer/reviewer/fixer/merger 共用）：宿主 spawn pi，
+ * agent 正文增量落盘 issue 日志（不进终端）。关键信息：开场 log 路径（可 tail）、
+ * 心跳、阶段结束 + 退出码 + 耗时 + 输出量 + 超时 + session id；
+ * agent 完整事件流留在 session 文件（stage 带轮次后缀避免覆盖）。
  */
-async function implementerPhase(
+async function runAgentPhase(
   config: Config,
   worktree: string,
   branch: string,
   issue: Issue,
   logger: IssueLogger,
-): Promise<void> {
-  logger.log(`implementer 阶段（${config.model}）… log: ${reportPath(logger.file)}`)
+  opts: { stage: string; prompt: string; model: string; label: string },
+): Promise<StageResult> {
+  logger.log(`${opts.label}（${opts.model}）… log: ${reportPath(logger.file)}`)
   const startedAt = Date.now()
-  // 心跳：长 implementer 静默期终端仍有「还在跑」信号（宿主 timer，与 watchdog 无关）
+  // 心跳：长静默期终端仍有「还在跑」信号（宿主 timer，与 watchdog 无关）
   const heartbeat = setInterval(() => {
-    logger.log(`implementer 运行中 ${Math.round((Date.now() - startedAt) / 1000)}s…`)
+    logger.log(`${opts.label} 运行中 ${Math.round((Date.now() - startedAt) / 1000)}s…`)
   }, HEARTBEAT_MS)
   let result: StageResult
   try {
     result = await new HostExecutor(config).runStage(
       {
-        prompt: implementerPrompt(issue, branch),
-        model: config.model,
-        stage: 'implementer',
+        prompt: opts.prompt,
+        model: opts.model,
+        stage: opts.stage,
         branch,
         cwd: worktree,
       },
@@ -296,9 +352,26 @@ async function implementerPhase(
   const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1)
   const outputKb = (Buffer.byteLength(result.stdout, 'utf8') / 1024).toFixed(0)
   logger.log(
-    `implementer 结束：退出码 ${result.exitCode}${result.timedOut ? '（超时）' : ''}，耗时 ${durationSec}s，输出 ${outputKb}KB`,
+    `${opts.label} 结束：退出码 ${result.exitCode}${result.timedOut ? '（超时）' : ''}，耗时 ${durationSec}s，输出 ${outputKb}KB`,
   )
   if (result.sessionId) logger.log(`session: ${result.sessionId}`)
+  return result
+}
+
+/** 单阶段 implementer：写代码 + 验证 + 提交；非零退出抛带结构的 StageFailure */
+async function implementerPhase(
+  config: Config,
+  worktree: string,
+  branch: string,
+  issue: Issue,
+  logger: IssueLogger,
+): Promise<void> {
+  const result = await runAgentPhase(config, worktree, branch, issue, logger, {
+    stage: 'implementer',
+    prompt: implementerPrompt(issue, branch),
+    model: config.model,
+    label: 'implementer 阶段',
+  })
   if (result.exitCode !== 0) {
     throw new StageFailure(
       'implementer',
@@ -307,5 +380,143 @@ async function implementerPhase(
       result.sessionFile,
       result.timedOut,
     )
+  }
+}
+
+/**
+ * review 循环（≤ maxReviewRounds 轮）：同一 worktree、每轮新会话。
+ * reviewer 输出 <verdict>approve|request-changes</verdict> 结构化结论；
+ * request-changes → 反馈发 PR comment → fixer 新会话修复 → push → 复审。
+ * 返回通过的轮数；耗尽仍不通过 → 抛错走失败路径（PR/远端保留，人工可接手）。
+ */
+async function reviewLoop(
+  config: Config,
+  worktree: string,
+  branch: string,
+  issue: Issue,
+  logger: IssueLogger,
+): Promise<number> {
+  const model = config.reviewerModel || config.model
+  for (let round = 1; round <= config.maxReviewRounds; round++) {
+    const review = await runAgentPhase(config, worktree, branch, issue, logger, {
+      stage: `reviewer-${round}`,
+      prompt: reviewerPrompt(issue, branch, config.baseBranch),
+      model,
+      label: `reviewer 阶段 第${round}轮`,
+    })
+    if (review.exitCode !== 0) {
+      throw new StageFailure(
+        'reviewer',
+        review.exitCode,
+        review.stderr,
+        review.sessionFile,
+        review.timedOut,
+      )
+    }
+    if (parseVerdict(review.stdout) === 'approve') return round
+
+    // request-changes：反馈 → PR comment + fixer 修复 → push → 复审
+    const feedback = review.stdout.trim()
+    if (round >= config.maxReviewRounds) {
+      throw new Error(`review 第 ${round} 轮仍未通过（maxReviewRounds=${config.maxReviewRounds}）`)
+    }
+    await tryReport(
+      logger,
+      () => prComment(issue.number, `🔍 afk review 第 ${round} 轮：需修复\n\n${feedback}`),
+      `review 反馈发 PR`,
+    )
+    const fix = await runAgentPhase(config, worktree, branch, issue, logger, {
+      stage: `fixer-${round}`,
+      prompt: implementerFixPrompt(issue, branch, feedback),
+      model: config.model,
+      label: `fixer 阶段 第${round}轮`,
+    })
+    if (fix.exitCode !== 0) {
+      throw new StageFailure('fixer', fix.exitCode, fix.stderr, fix.sessionFile, fix.timedOut)
+    }
+    await pushBranchRetry(worktree, branch)
+  }
+  // 不可达：round 达到上限且未通过时上面已抛
+  return config.maxReviewRounds
+}
+
+/** 提取 <verdict> 结构化结论；缺失/非法按 request-changes（保守，原文留给 fixer） */
+function parseVerdict(stdout: string): 'approve' | 'request-changes' {
+  const m = stdout.match(/<verdict>\s*(approve|request-changes)\s*<\/verdict>/)
+  return m && m[1] === 'approve' ? 'approve' : 'request-changes'
+}
+
+/** push 重试：普通 push 失败（非快进等）→ force-with-lease 覆盖（修复/化解后应 fast-forward，兜底） */
+async function pushBranchRetry(path: string, branch: string): Promise<void> {
+  try {
+    await pushBranch(path, branch)
+  } catch {
+    await pushBranch(path, branch, { force: true })
+  }
+}
+
+/**
+ * 合并阶段（宿主串行队列内调用，一次一个 PR）：
+ * ① 锁内 fetch 最新 base（批内其他 PR 合并后 base 已推进）
+ * ② 把 base merge 进分支：干净 → push；冲突 → merger agent 化解 + 提交 + push（≤ conflictTries 次）
+ * ③ 等 checks（waitForChecks，超时 mergeTimeoutSec）→ gh pr merge --squash --delete-branch
+ * 任一步失败/耗尽 → 抛错走 issue 失败路径（PR/远端分支保留，人工可接手）。
+ */
+async function mergePhase(
+  config: Config,
+  worktree: string,
+  branch: string,
+  issue: Issue,
+  logger: IssueLogger,
+): Promise<void> {
+  await fetchBase(config) // 串行段：合并前拿最新 base（worktree 共享宿主 refs）
+  for (let attempt = 1; attempt <= config.conflictTries; attempt++) {
+    const clean = await mergeBaseIntoBranch(worktree, branch, config.baseBranch)
+    if (!clean) {
+      // 冲突：merger agent 化解（同一 worktree、新会话）
+      const files = await conflictedFiles(worktree)
+      logger.log(
+        `合并冲突（第 ${attempt} 次尝试）：${files.join('、') || '见 git status'} → merger agent`,
+      )
+      const merge = await runAgentPhase(config, worktree, branch, issue, logger, {
+        stage: `merger-${attempt}`,
+        prompt: mergerPrompt(issue, branch, config.baseBranch, files),
+        model: config.model,
+        label: `merger 阶段 第${attempt}次`,
+      })
+      if (merge.exitCode !== 0) {
+        throw new StageFailure(
+          'merger',
+          merge.exitCode,
+          merge.stderr,
+          merge.sessionFile,
+          merge.timedOut,
+        )
+      }
+    }
+    // 同步后分支 HEAD 前进（merge commit / 化解提交），push 让 GitHub 重新评估 PR
+    await pushBranchRetry(worktree, branch)
+
+    if (config.waitForChecks) {
+      logger.log(`等 checks（超时 ${config.mergeTimeoutSec}s）…`)
+      const state = await waitForChecksPass(issue.number, config.mergeTimeoutSec)
+      if (state === 'fail') throw new Error(`PR checks 失败（#${issue.number}）`)
+      if (state === 'timeout')
+        throw new Error(`等 checks 超时（${config.mergeTimeoutSec}s，PR #${issue.number}）`)
+    }
+    try {
+      await mergePr(issue.number)
+      logger.log(`PR #${issue.number} 已合并（squash，远端分支已删）`)
+      return
+    } catch (error) {
+      if (attempt >= config.conflictTries) {
+        throw new Error(
+          `合并失败（已尝试 ${attempt} 次）：${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      logger.log(
+        `合并未通过（第 ${attempt} 次）：${error instanceof Error ? error.message : String(error)} → 重新同步 base`,
+      )
+    }
   }
 }

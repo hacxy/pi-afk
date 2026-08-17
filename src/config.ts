@@ -24,6 +24,13 @@ export const DEFAULT_CONFIG = {
   sessionsDir: '.pi/afk/sessions',
   idleTimeoutSec: 600,
   completionTimeoutSec: 60,
+  // 完整流程：codereview + 合并 PR（默认关，opt-in）
+  autoMerge: false,
+  mergedLabel: 'agent:merged',
+  maxReviewRounds: 2,
+  conflictTries: 2,
+  waitForChecks: true,
+  mergeTimeoutSec: 600,
 } as const
 
 /** 项目配置（含可选 git 提交身份键，opt-in 成对） */
@@ -45,6 +52,20 @@ export interface Config {
   completionTimeoutSec: number
   gitAuthor?: string
   gitEmail?: string
+  /** 合并 PR（false = review 通过后停在 PR，人工 merge） */
+  autoMerge: boolean
+  /** 合并成功后补打的 label */
+  mergedLabel: string
+  /** review agent 模型（缺省回落 model） */
+  reviewerModel?: string
+  /** review → 修复 循环上限 */
+  maxReviewRounds: number
+  /** merge 冲突 agent 化解尝试上限 */
+  conflictTries: number
+  /** merge 前等待 gh pr checks 通过 */
+  waitForChecks: boolean
+  /** 等 checks / 化解冲突的总超时（秒） */
+  mergeTimeoutSec: number
 }
 
 /** 环境变量覆盖映射：AFK_* → 配置键 → 类型化（数字走 Number，坏值由 schema 拦截） */
@@ -64,7 +85,21 @@ const ENV_MAP: ReadonlyArray<readonly [string, keyof Config, (v: string) => unkn
   ['AFK_INSTALL_CMD', 'installCmd', (v) => v],
   ['AFK_IDLE_TIMEOUT_SEC', 'idleTimeoutSec', Number],
   ['AFK_COMPLETION_TIMEOUT_SEC', 'completionTimeoutSec', Number],
+  ['AFK_AUTO_MERGE', 'autoMerge', parseBool],
+  ['AFK_MERGED_LABEL', 'mergedLabel', (v) => v],
+  ['AFK_REVIEWER_MODEL', 'reviewerModel', (v) => v],
+  ['AFK_MAX_REVIEW_ROUNDS', 'maxReviewRounds', Number],
+  ['AFK_CONFLICT_TRIES', 'conflictTries', Number],
+  ['AFK_WAIT_FOR_CHECKS', 'waitForChecks', parseBool],
+  ['AFK_MERGE_TIMEOUT_SEC', 'mergeTimeoutSec', Number],
 ]
+
+/** 布尔 env 解析：'true'/'false' 转布尔，坏值原样透传交给 schema 拦截 */
+function parseBool(v: string): unknown {
+  if (v === 'true') return true
+  if (v === 'false') return false
+  return v
+}
 
 /** 配置 schema：.strict() 拒绝未知键；缺省键回落默认值；可选键不要求 */
 const schema = z
@@ -86,6 +121,13 @@ const schema = z
     completionTimeoutSec: z.number().int().min(1).default(DEFAULT_CONFIG.completionTimeoutSec),
     gitAuthor: z.string().optional(),
     gitEmail: z.string().optional(),
+    autoMerge: z.boolean().default(DEFAULT_CONFIG.autoMerge),
+    mergedLabel: z.string().default(DEFAULT_CONFIG.mergedLabel),
+    reviewerModel: z.string().optional(),
+    maxReviewRounds: z.number().int().min(1).default(DEFAULT_CONFIG.maxReviewRounds),
+    conflictTries: z.number().int().min(1).default(DEFAULT_CONFIG.conflictTries),
+    waitForChecks: z.boolean().default(DEFAULT_CONFIG.waitForChecks),
+    mergeTimeoutSec: z.number().int().min(1).default(DEFAULT_CONFIG.mergeTimeoutSec),
   })
   .strict()
 

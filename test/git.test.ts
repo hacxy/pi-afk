@@ -3,7 +3,7 @@
  * 每个用例自建 bare remote 作为 origin，验证 createWorktree/archiveWorktree/deleteBranch/cleanupStale。
  */
 import { execSync } from 'node:child_process'
-import { existsSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -12,9 +12,13 @@ import { DEFAULT_CONFIG } from '../src/config.js'
 import {
   archiveWorktree,
   cleanupStale,
+  conflictedFiles,
   createWorktree,
   deleteBranch,
   fetchBase,
+  hasRemoteBranch,
+  mergeBaseIntoBranch,
+  pushBranch,
   worktreePath,
 } from '../src/git.js'
 
@@ -148,5 +152,74 @@ describe('cleanupStale + 干净重跑（真实仓库）', () => {
     expect(existsSync(second)).toBe(true)
     expect(branchExists('afk/issue-4-demo')).toBe(true)
     expect(existsSync(join(second, 'attempt1.txt'))).toBe(false) // 从 origin/main 全新重建
+  })
+})
+
+describe('hasRemoteBranch + force push（真实仓库）', () => {
+  it('远端分支存在判定 + force-with-lease 覆盖非快进 push', async () => {
+    const base = await fetchBase(cfg, repo)
+    const path = await createWorktree(cfg, 'afk/issue-f', base, worktreesDir, repo)
+
+    // 未 push 前：远端无分支
+    expect(await hasRemoteBranch('afk/issue-f', repo)).toBe(false)
+
+    // 首次普通 push → 远端有分支
+    writeFileSync(join(path, 'f.txt'), '1\n')
+    sh('git add -A && git commit -m one', path)
+    await pushBranch(path, 'afk/issue-f')
+    expect(await hasRemoteBranch('afk/issue-f', repo)).toBe(true)
+
+    // 重写历史（amend）→ 普通 push 非快进失败 → force-with-lease 成功
+    writeFileSync(join(path, 'f.txt'), '2\n')
+    sh('git add -A && git commit --amend -m two --no-edit', path)
+    await expect(pushBranch(path, 'afk/issue-f')).rejects.toThrow()
+    await pushBranch(path, 'afk/issue-f', { force: true })
+  })
+})
+
+describe('mergeBaseIntoBranch + conflictedFiles（真实仓库）', () => {
+  it('分支落后 base：干净合并 → true，分支获得 base 新内容', async () => {
+    const base = await fetchBase(cfg, repo)
+    const path = await createWorktree(cfg, 'afk/issue-m', base, worktreesDir, repo)
+    // 分支改动（不碰 README）
+    writeFileSync(join(path, 'feat.txt'), 'issue work\n')
+    sh('git add -A && git commit -m feat', path)
+
+    // base 推进（改 README，与分支无冲突）
+    writeFileSync(join(repo, 'README.md'), 'base v2\n')
+    sh('git add -A && git commit -m base-v2')
+    sh('git push -u origin main')
+    await fetchBase(cfg, repo)
+
+    expect(await mergeBaseIntoBranch(path, 'afk/issue-m', 'main')).toBe(true)
+    expect(conflictedFiles(path)).resolves.toEqual([])
+    // 分支现在包含 base 新内容 + 自己的改动
+    expect(readFileSync(join(path, 'README.md'), 'utf8')).toContain('base v2')
+    expect(existsSync(join(path, 'feat.txt'))).toBe(true)
+  })
+
+  it('与 base 同文件冲突：merge → false，conflictedFiles 列出文件；化解后清单清空', async () => {
+    const base = await fetchBase(cfg, repo)
+    const path = await createWorktree(cfg, 'afk/issue-c', base, worktreesDir, repo)
+    // 分支改 README 第一行
+    writeFileSync(join(path, 'README.md'), 'branch line\n')
+    sh('git add -A && git commit -m feat', path)
+
+    // base 也改 README 第一行（同一行 → 冲突）
+    writeFileSync(join(repo, 'README.md'), 'base line\n')
+    sh('git add -A && git commit -m base-v2')
+    sh('git push -u origin main')
+    await fetchBase(cfg, repo)
+
+    expect(await mergeBaseIntoBranch(path, 'afk/issue-c', 'main')).toBe(false)
+    const files = await conflictedFiles(path)
+    expect(files).toEqual(['README.md'])
+
+    // 化解（模拟 merger agent）：保留双方意图 → git add + 完成 merge
+    writeFileSync(join(path, 'README.md'), 'base line + branch line\n')
+    sh('git add README.md', path)
+    sh('git commit --no-edit', path)
+    expect(await conflictedFiles(path)).toEqual([])
+    expect(existsSync(join(path, 'README.md'))).toBe(true)
   })
 })

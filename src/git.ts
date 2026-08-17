@@ -118,6 +118,52 @@ export async function archiveWorktree(
   return dest
 }
 
-export async function pushBranch(path: string, branch: string): Promise<void> {
-  await git(['push', '-u', 'origin', branch], path)
+export async function pushBranch(
+  path: string,
+  branch: string,
+  opts: { force?: boolean } = {},
+): Promise<void> {
+  // force 场景：重跑覆盖远端残留（Q7：force-with-lease 带租约，不会盖掉别人的新提交）
+  const args = opts.force
+    ? ['push', '--force-with-lease', '-u', 'origin', branch]
+    : ['push', '-u', 'origin', branch]
+  await git(args, path)
+}
+
+/** 远端是否已存在同名分支（重跑场景判断是否需 force push 覆盖） */
+export async function hasRemoteBranch(
+  branch: string,
+  repoRoot: string = process.cwd(),
+): Promise<boolean> {
+  const { stdout } = await execa('git', ['ls-remote', '--heads', 'origin', branch], {
+    cwd: repoRoot,
+    reject: false,
+  })
+  return stdout.trim().length > 0
+}
+
+/**
+ * 把最新 base merge 进分支（worktree 内，共享宿主 repo 的 refs，无需再 fetch）。
+ * 返回 true = 干净合并（merge commit 已自动提交）；false = 冲突（工作树处于冲突状态，交给 merger agent）。
+ */
+export async function mergeBaseIntoBranch(
+  path: string,
+  branch: string,
+  baseBranch: string,
+): Promise<boolean> {
+  const { exitCode } = await execa(
+    'git',
+    ['merge', `origin/${baseBranch}`, '-m', `afk: 同步 ${branch} 到最新 ${baseBranch}`],
+    { cwd: path, reject: false },
+  )
+  return exitCode === 0
+}
+
+/** 当前未解决的冲突文件清单（git diff --name-only --diff-filter=U），merger agent 输入用 */
+export async function conflictedFiles(path: string): Promise<string[]> {
+  const { stdout } = await execa('git', ['diff', '--name-only', '--diff-filter=U'], {
+    cwd: path,
+    reject: false,
+  })
+  return stdout.split('\n').filter((l) => l.trim().length > 0)
 }
