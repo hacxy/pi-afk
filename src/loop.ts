@@ -179,17 +179,18 @@ async function processIssue(
 
     // 开 PR（body 带 Closes #N，合并时 GitHub 自动关 issue）
     currentStage = 'pr'
-    const prUrl = await openPr({
+    // GitHub issue/PR 共享编号命名空间：PR 编号 ≠ issue 编号，后续 PR 操作用 pr.number
+    const pr = await openPr({
       branch,
       base: config.baseBranch,
       title: issue.title,
       body: prBody(issue),
     })
-    logger.log(`PR 已开 → ${prUrl}`)
+    logger.log(`PR 已开 → ${pr.url}`)
 
     // codereview：同一 worktree、新会话，review 循环（≤ maxReviewRounds 轮）
     currentStage = 'review'
-    const reviewRounds = await reviewLoop(config, worktree, branch, issue, logger)
+    const reviewRounds = await reviewLoop(config, worktree, branch, pr.number, issue, logger)
     logger.log(`review ${reviewRounds} 轮通过`)
 
     // 合并 PR（autoMerge opt-in；宿主串行队列内 fetch 最新 base + 化解冲突）
@@ -198,9 +199,9 @@ async function processIssue(
       currentStage = 'merge'
       // 闭包内 worktree 被悲观收窄为 string | undefined，先拷贝为确定值
       const wt = worktree
-      await mergeQueue.run(() => mergePhase(config, wt, branch, issue, logger))
+      await mergeQueue.run(() => mergePhase(config, wt, branch, pr.number, issue, logger))
       merged = true
-      logger.log(`已合并 → ${prUrl}`)
+      logger.log(`已合并 → ${pr.url}`)
       await tryReport(logger, () => addLabel(issue.number, config.mergedLabel), `加 merged label`)
     }
 
@@ -212,7 +213,7 @@ async function processIssue(
           issue.number,
           successComment({
             branch,
-            prUrl,
+            prUrl: pr.url,
             compareUrl: compareUrl(await repoName(), config.baseBranch, branch),
             merged,
             reviewRounds,
@@ -388,11 +389,13 @@ async function implementerPhase(
  * reviewer 输出 <verdict>approve|request-changes</verdict> 结构化结论；
  * request-changes → 反馈发 PR comment → fixer 新会话修复 → push → 复审。
  * 返回通过的轮数；耗尽仍不通过 → 抛错走失败路径（PR/远端保留，人工可接手）。
+ * prNumber：PR 编号（≠ issue 编号，GitHub 共享命名空间）。
  */
 async function reviewLoop(
   config: Config,
   worktree: string,
   branch: string,
+  prNumber: number,
   issue: Issue,
   logger: IssueLogger,
 ): Promise<number> {
@@ -422,7 +425,7 @@ async function reviewLoop(
     }
     await tryReport(
       logger,
-      () => prComment(issue.number, `🔍 afk review 第 ${round} 轮：需修复\n\n${feedback}`),
+      () => prComment(prNumber, `🔍 afk review 第 ${round} 轮：需修复\n\n${feedback}`),
       `review 反馈发 PR`,
     )
     const fix = await runAgentPhase(config, worktree, branch, issue, logger, {
@@ -461,11 +464,13 @@ async function pushBranchRetry(path: string, branch: string): Promise<void> {
  * ② 把 base merge 进分支：干净 → push；冲突 → merger agent 化解 + 提交 + push（≤ conflictTries 次）
  * ③ 等 checks（waitForChecks，超时 mergeTimeoutSec）→ gh pr merge --squash --delete-branch
  * 任一步失败/耗尽 → 抛错走 issue 失败路径（PR/远端分支保留，人工可接手）。
+ * prNumber：PR 编号（≠ issue 编号，GitHub 共享命名空间）。
  */
 async function mergePhase(
   config: Config,
   worktree: string,
   branch: string,
+  prNumber: number,
   issue: Issue,
   logger: IssueLogger,
 ): Promise<void> {
@@ -499,14 +504,14 @@ async function mergePhase(
 
     if (config.waitForChecks) {
       logger.log(`等 checks（超时 ${config.mergeTimeoutSec}s）…`)
-      const state = await waitForChecksPass(issue.number, config.mergeTimeoutSec)
-      if (state === 'fail') throw new Error(`PR checks 失败（#${issue.number}）`)
+      const state = await waitForChecksPass(prNumber, config.mergeTimeoutSec)
+      if (state === 'fail') throw new Error(`PR checks 失败（PR #${prNumber}）`)
       if (state === 'timeout')
-        throw new Error(`等 checks 超时（${config.mergeTimeoutSec}s，PR #${issue.number}）`)
+        throw new Error(`等 checks 超时（${config.mergeTimeoutSec}s，PR #${prNumber}）`)
     }
     try {
-      await mergePr(issue.number)
-      logger.log(`PR #${issue.number} 已合并（squash，远端分支已删）`)
+      await mergePr(prNumber)
+      logger.log(`PR #${prNumber} 已合并（squash，远端分支已删）`)
       return
     } catch (error) {
       if (attempt >= config.conflictTries) {

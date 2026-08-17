@@ -50,31 +50,37 @@ export async function removeLabel(number: number, label: string): Promise<void> 
 }
 
 /**
- * 开 PR（D1）：head=afk 分支，base=基线分支，body 带 Closes #N（人工 merge 时 GitHub 自动关 issue）。
- * body 走 --body-file 避免 shell 转义；返回 PR URL。
+ * 开 PR（D1）：head=afk 分支，base=基线分支，body 带 Closes #N（合并时 GitHub 自动关 issue）。
+ * body 走 --body-file 避免 shell 转义；返回 { number, url }。
+ * ⚠️ GitHub issue 与 PR 共享编号命名空间：PR 编号 ≠ issue 编号，
+ * 后续 pr comment / 等 checks / merge 必须用 PR 编号（勿用 issue.number）。
  */
 export async function openPr(opts: {
   branch: string
   base: string
   title: string
   body: string
-}): Promise<string> {
+}): Promise<{ number: number; url: string }> {
   const file = join(tmpdir(), `afk-pr-${Date.now()}.md`)
   writeFileSync(file, opts.body)
   try {
-    const url = await gh([
-      'pr',
-      'create',
-      '--head',
-      opts.branch,
-      '--base',
-      opts.base,
-      '--title',
-      opts.title,
-      '--body-file',
-      file,
-    ])
-    return url.trim()
+    const url = (
+      await gh([
+        'pr',
+        'create',
+        '--head',
+        opts.branch,
+        '--base',
+        opts.base,
+        '--title',
+        opts.title,
+        '--body-file',
+        file,
+      ])
+    ).trim()
+    const m = url.match(/\/pull\/(\d+)/)
+    if (!m) throw new Error(`无法从 PR URL 解析编号：${url}`)
+    return { number: Number(m[1]), url }
   } finally {
     unlinkSync(file)
   }

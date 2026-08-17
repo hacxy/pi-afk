@@ -117,7 +117,10 @@ beforeEach(() => {
     flushAgent: vi.fn(),
     file: resolve(`.pi/afk/logs/issue-${n}.log`),
   }))
-  vi.mocked(openPr).mockReturnValue('https://github.com/hacxy/pi-afk/pull/100')
+  vi.mocked(openPr).mockReturnValue({
+    number: 100,
+    url: 'https://github.com/hacxy/pi-afk/pull/100',
+  })
   vi.mocked(installDeps).mockResolvedValue(undefined)
   vi.mocked(hasRemoteBranch).mockResolvedValue(false)
   vi.mocked(mergeBaseIntoBranch).mockResolvedValue(true)
@@ -228,8 +231,9 @@ describe('runAfk 完整 pipeline（宿主后端，autoMerge=false 默认）', ()
     const stages = stageCalls().map((c) => c.stage)
     expect(stages).toEqual(['implementer', 'reviewer-1', 'fixer-1', 'reviewer-2'])
 
-    // review 反馈发 PR comment（含问题清单）
+    // review 反馈发 PR comment（PR 编号 ≠ issue 编号，含问题清单）
     expect(prComment).toHaveBeenCalledTimes(1)
+    expect(prComment).toHaveBeenCalledWith(100, expect.stringContaining('第 1 轮'))
     const reviewBody = vi.mocked(prComment).mock.calls[0][1]
     expect(reviewBody).toContain('第 1 轮')
     expect(reviewBody).toContain('空指针风险')
@@ -333,8 +337,8 @@ describe('runAfk autoMerge=true：合并 + 冲突化解', () => {
     // 合并阶段：锁内再 fetch 一次最新 base（迭代层一次 + 合并一次）
     expect(fetchBase).toHaveBeenCalledTimes(2)
     expect(mergeBaseIntoBranch).toHaveBeenCalledWith('/tmp/wt', 'afk/issue-52', 'main')
-    expect(waitForChecksPass).toHaveBeenCalledWith(52, 600)
-    expect(mergePr).toHaveBeenCalledWith(52)
+    expect(waitForChecksPass).toHaveBeenCalledWith(100, 600)
+    expect(mergePr).toHaveBeenCalledWith(100)
 
     // merged label + done label
     expect(addLabel).toHaveBeenCalledWith(52, 'agent:merged')
@@ -402,7 +406,7 @@ describe('runAfk autoMerge=true：合并 + 冲突化解', () => {
     const results = await runAfk(noWait)
     expect(results[0].status).toBe('done')
     expect(waitForChecksPass).not.toHaveBeenCalled()
-    expect(mergePr).toHaveBeenCalledWith(52)
+    expect(mergePr).toHaveBeenCalledWith(100)
   })
 
   it('批内并发 issue 的合并阶段串行（MergeQueue 一次一个，不并发 merge）', async () => {
