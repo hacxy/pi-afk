@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 import stripAnsi from 'strip-ansi'
 
 import { config } from './config.js'
+import { resolveGitIdentity } from './identity.js'
 
 /** 事件对象：pi `--mode json` 事件流的一行（透传，只按需取字段） */
 export interface PiEvent {
@@ -408,12 +409,18 @@ export class HostExecutor {
       completionMs: this.completionMs,
       sessionDir: this.sessionDir,
       cwd: ctx.cwd,
-      env: {
-        GIT_AUTHOR_NAME: config.gitAuthor,
-        GIT_AUTHOR_EMAIL: config.gitEmail,
-        GIT_COMMITTER_NAME: config.gitAuthor,
-        GIT_COMMITTER_EMAIL: config.gitEmail,
-      },
+      env: gitIdentityEnv(),
     })
+  }
+}
+
+/** pi spawn 的 git 提交身份 env：作者/提交者一致，来自解析链（env > 宿主 global > 硬失败） */
+function gitIdentityEnv(): NodeJS.ProcessEnv {
+  const { name, email } = resolveGitIdentity()
+  return {
+    GIT_AUTHOR_NAME: name,
+    GIT_AUTHOR_EMAIL: email,
+    GIT_COMMITTER_NAME: name,
+    GIT_COMMITTER_EMAIL: email,
   }
 }

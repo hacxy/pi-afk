@@ -1,6 +1,7 @@
 export { runAfk } from './loop.js'
 export type { IssueResult } from './loop.js'
 export { config } from './config.js'
+export { resolveGitIdentity, type GitIdentity } from './identity.js'
 export { installCommand, installDeps } from './install.js'
 export { implementerPrompt } from './prompts.js'
 export { compareUrl, failureComment, successComment } from './report.js'

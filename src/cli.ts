@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { resolveGitIdentity, type GitIdentity } from './identity.js'
 import { runAfk } from './index.js'
 import { log, logError } from './log.js'
 
@@ -13,10 +14,21 @@ const VERSION: string = JSON.parse(
 
 /** 无人值守循环（默认命令 action）：拉 issue → 分批并发完整流程 → 汇总 */
 export async function runAfkLoop(maxIterations?: string | number): Promise<void> {
+  // 提交身份启动即校验（拉 issue/建 worktree 前）：缺失 → 干净报错 + exit 1，不进 loop
+  let identity: GitIdentity
+  try {
+    identity = resolveGitIdentity()
+  } catch (error) {
+    logError(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+    return
+  }
   // 位置参数解析：默认 1，clamp ≥ 1（0/负数/非数字均按 1）
   const n = maxIterations === undefined || maxIterations === '' ? 1 : Number(maxIterations)
   const limit = Number.isFinite(n) ? Math.max(1, Math.floor(n)) : 1
-  log(`afk 启动：无人值守循环（本地 worktree 完整流程，最大迭代 ${limit}）`)
+  log(
+    `afk 启动：无人值守循环（本地 worktree 完整流程，最大迭代 ${limit}，提交身份 ${identity.name} <${identity.email}>）`,
+  )
   const results = await runAfk(limit)
 
   const done = results.filter((r) => r.status === 'done')

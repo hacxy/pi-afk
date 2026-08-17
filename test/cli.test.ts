@@ -4,8 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../src/index.js', () => ({ runAfk: vi.fn() }))
 vi.mock('../src/log.js', () => ({ log: vi.fn(), logError: vi.fn() }))
+vi.mock('../src/identity.js', () => ({
+  resolveGitIdentity: vi.fn(() => ({ name: 'hacxy', email: 'hacxy.js@outlook.com' })),
+}))
 
 import { runAfkLoop } from '../src/cli.js'
+import { resolveGitIdentity } from '../src/identity.js'
 import { runAfk } from '../src/index.js'
 import { log, logError } from '../src/log.js'
 
@@ -13,6 +17,7 @@ const issue = (number: number, title: string) => ({ number, title, body: 'body',
 
 beforeEach(() => {
   vi.clearAllMocks()
+  process.exitCode = 0
 })
 
 describe('runAfkLoop（默认命令 action）', () => {
@@ -63,6 +68,28 @@ describe('runAfkLoop（默认命令 action）', () => {
     expect(runAfk).toHaveBeenCalledWith(1)
     await runAfkLoop()
     expect(runAfk).toHaveBeenCalledWith(1)
+  })
+
+  it('身份缺失 → 启动即拦：logError + exitCode 1，不跑 loop', async () => {
+    vi.mocked(resolveGitIdentity).mockImplementationOnce(() => {
+      throw new Error(
+        '无法确定 git 提交身份：请用任一方式设置——① git config --global user.name/user.email；② 环境变量 AFK_GIT_AUTHOR/AFK_GIT_EMAIL',
+      )
+    })
+
+    await runAfkLoop()
+
+    expect(logError).toHaveBeenCalledWith(expect.stringContaining('无法确定 git 提交身份'))
+    expect(process.exitCode).toBe(1)
+    expect(runAfk).not.toHaveBeenCalled()
+  })
+
+  it('身份就绪 → 启动日志含提交身份', async () => {
+    vi.mocked(runAfk).mockResolvedValue([])
+
+    await runAfkLoop()
+
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('hacxy <hacxy.js@outlook.com>'))
   })
 })
 

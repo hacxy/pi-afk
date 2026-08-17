@@ -262,6 +262,16 @@ describe('SessionRecorder 会话落盘', () => {
 })
 
 describe('HostExecutor 宿主后端（假 spawn）', () => {
+  // git 身份解析走真实单例：设 env 保持确定性（不 spawn git），用后恢复
+  beforeEach(() => {
+    process.env.AFK_GIT_AUTHOR = 'afk-test'
+    process.env.AFK_GIT_EMAIL = 'afk-test@example.com'
+  })
+  afterEach(() => {
+    delete process.env.AFK_GIT_AUTHOR
+    delete process.env.AFK_GIT_EMAIL
+  })
+
   function makeExecutor(overrides: { idleMs?: number; completionMs?: number } = {}) {
     const child = makeFakeChild()
     const sessionDir = mkdtempSync(join(tmpdir(), 'afk-host-'))
@@ -383,6 +393,33 @@ describe('HostExecutor 宿主后端（假 spawn）', () => {
     child.exit(1, null)
     const result = await promise
     expect(result.stderr).toBe('真实错误\n')
+  })
+
+  it('注入 git 提交身份 env：作者/提交者 = 解析身份（AFK_GIT_*）', async () => {
+    const child = makeFakeChild()
+    let spawnEnv: NodeJS.ProcessEnv | undefined
+    const executor = new HostExecutor({
+      spawnFn: (_cmd, _args, opts) => {
+        spawnEnv = opts.env
+        return child
+      },
+      idleMs: 1000,
+      completionMs: 500,
+      sessionDir: mkdtempSync(join(tmpdir(), 'afk-host-')),
+    })
+
+    const promise = executor.runStage(ctx)
+    child.stdout.write('{"type":"session","id":"s6"}\n')
+    child.stdout.end()
+    child.exit(0, null)
+    await promise
+
+    expect(spawnEnv).toMatchObject({
+      GIT_AUTHOR_NAME: 'afk-test',
+      GIT_AUTHOR_EMAIL: 'afk-test@example.com',
+      GIT_COMMITTER_NAME: 'afk-test',
+      GIT_COMMITTER_EMAIL: 'afk-test@example.com',
+    })
   })
 })
 

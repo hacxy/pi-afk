@@ -24,9 +24,6 @@ export const config = {
   logsDir: process.env.AFK_LOGS_DIR ?? '.pi/afk/logs',
   /** 会话记录目录：--mode json 事件流落盘（gitignore） */
   sessionsDir: process.env.AFK_SESSIONS_DIR ?? '.pi/afk/sessions',
-  /** 提交身份（host 后端 spawn env 注入，agent commit 用） */
-  gitAuthor: process.env.AFK_GIT_AUTHOR ?? 'afk',
-  gitEmail: process.env.AFK_GIT_EMAIL ?? 'afk@hacxy.cn',
   /** 依赖安装命令覆盖（默认按 worktree lockfile 检测） */
   installCmd: process.env.AFK_INSTALL_CMD,
   /** 双超时（秒）：idle = 无事件活动上限；completion = 终态后等待进程退出宽限 */
