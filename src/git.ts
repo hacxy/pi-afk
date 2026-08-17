@@ -1,8 +1,8 @@
+import type { Config } from './config.js'
+
 import { execa } from 'execa'
 import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-
-import { config } from './config.js'
 
 /** 跑 git 命令：参数数组传递（无 shell 转义风险），非零退出/spawn 失败 reject。 */
 async function git(args: string[], cwd?: string): Promise<string> {
@@ -10,12 +10,16 @@ async function git(args: string[], cwd?: string): Promise<string> {
   return stdout
 }
 
-/** 分支名规范：只使用 issue 编号（afk/issue-N），避免非 ASCII 触发 GitHub 隐藏字符告警 */
-export function branchName(issue: { number: number }): string {
+/** 分支名规范：只使用 issue 编号（<prefix>/issue-N），避免非 ASCII 触发 GitHub 隐藏字符告警 */
+export function branchName(config: Config, issue: { number: number }): string {
   return `${config.branchPrefix}/issue-${issue.number}`
 }
 
-export function worktreePath(branch: string, dir: string = config.worktreesDir): string {
+export function worktreePath(
+  config: Config,
+  branch: string,
+  dir: string = config.worktreesDir,
+): string {
   return resolve(dir, branch)
 }
 
@@ -36,11 +40,12 @@ export async function deleteBranch(
  * 保证「改回 agent:todo 重跑」不被残留分支/worktree 卡住（含上次崩溃的残留）。
  */
 export async function cleanupStale(
+  config: Config,
   branch: string,
   dir: string = config.worktreesDir,
   repoRoot: string = process.cwd(),
 ): Promise<void> {
-  const path = worktreePath(branch, dir)
+  const path = worktreePath(config, branch, dir)
   try {
     await git(['worktree', 'remove', path, '--force'], repoRoot)
   } catch {
@@ -56,7 +61,7 @@ export async function cleanupStale(
  * 同仓库并发 `git fetch` 会撞 ref 事务锁（cannot lock ref ... is at X but expected Y），
  * 即 #74 的 git 阶段报错。
  */
-export async function fetchBase(repoRoot: string = process.cwd()): Promise<string> {
+export async function fetchBase(config: Config, repoRoot: string = process.cwd()): Promise<string> {
   await git(['fetch', 'origin', config.baseBranch], repoRoot)
   return (await git(['rev-parse', `origin/${config.baseBranch}`], repoRoot)).trim()
 }
@@ -67,14 +72,15 @@ export async function fetchBase(repoRoot: string = process.cwd()): Promise<strin
  * 建之前先 cleanupStale，保证残留分支/worktree 不会卡住重跑。
  */
 export async function createWorktree(
+  config: Config,
   branch: string,
   baseSha: string,
   dir: string = config.worktreesDir,
   repoRoot: string = process.cwd(),
 ): Promise<string> {
-  const path = worktreePath(branch, dir)
+  const path = worktreePath(config, branch, dir)
   mkdirSync(resolve(dir), { recursive: true })
-  await cleanupStale(branch, dir, repoRoot)
+  await cleanupStale(config, branch, dir, repoRoot)
   await git(['worktree', 'add', path, '-b', branch, baseSha], repoRoot)
   return path
 }
@@ -96,6 +102,7 @@ export async function removeWorktree(
  * 并 prune 掉失效的 worktree 注册。返回归档路径；worktree 目录不存在时返回 undefined。
  */
 export async function archiveWorktree(
+  config: Config,
   path: string,
   branch: string,
   failedDir: string = config.failedDir,

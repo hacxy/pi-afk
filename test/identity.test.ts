@@ -36,7 +36,7 @@ describe('resolveGitIdentity 身份解析链', () => {
     process.env.AFK_GIT_AUTHOR = 'override-name'
     process.env.AFK_GIT_EMAIL = 'override@example.com'
 
-    const resolve = createGitIdentityResolver()
+    const resolve = createGitIdentityResolver({})
 
     expect(resolve()).toEqual({ name: 'override-name', email: 'override@example.com' })
   })
@@ -48,7 +48,7 @@ describe('resolveGitIdentity 身份解析链', () => {
       '[user]\n\tname = global-name\n\temail = global@example.com\n',
     )
 
-    const resolve = createGitIdentityResolver()
+    const resolve = createGitIdentityResolver({})
 
     expect(resolve()).toEqual({ name: 'global-name', email: 'global@example.com' })
   })
@@ -58,7 +58,7 @@ describe('resolveGitIdentity 身份解析链', () => {
     delete process.env.AFK_GIT_EMAIL
     process.env.GIT_CONFIG_GLOBAL = tempGlobalConfig('') // 空 global：无 user.name/user.email
 
-    const resolve = createGitIdentityResolver()
+    const resolve = createGitIdentityResolver({})
 
     expect(() => resolve()).toThrow(/git config --global/)
     expect(() => resolve()).toThrow(/AFK_GIT_AUTHOR/)
@@ -68,7 +68,7 @@ describe('resolveGitIdentity 身份解析链', () => {
     process.env.AFK_GIT_AUTHOR = 'only-name'
     delete process.env.AFK_GIT_EMAIL
 
-    const resolve = createGitIdentityResolver()
+    const resolve = createGitIdentityResolver({})
 
     expect(() => resolve()).toThrow(/同时设置/)
   })
@@ -80,16 +80,50 @@ describe('resolveGitIdentity 身份解析链', () => {
       '[user]\n\tname = fallback-name\n\temail = fallback@example.com\n',
     )
 
-    const resolve = createGitIdentityResolver()
+    const resolve = createGitIdentityResolver({})
 
     expect(resolve()).toEqual({ name: 'fallback-name', email: 'fallback@example.com' })
+  })
+
+  it('config.json 提供成对身份（env 未设）→ 使用 config 身份，不查 gitconfig', () => {
+    delete process.env.AFK_GIT_AUTHOR
+    delete process.env.AFK_GIT_EMAIL
+    process.env.GIT_CONFIG_GLOBAL = tempGlobalConfig('') // 空 global：即使 global 也没有也 OK
+
+    const resolve = createGitIdentityResolver({
+      gitAuthor: 'cfg-name',
+      gitEmail: 'cfg@example.com',
+    })
+
+    expect(resolve()).toEqual({ name: 'cfg-name', email: 'cfg@example.com' })
+  })
+
+  it('config.json 只提供一半 → 抛错（gitAuthor/gitEmail 必须成对）', () => {
+    delete process.env.AFK_GIT_AUTHOR
+    delete process.env.AFK_GIT_EMAIL
+
+    const resolve = createGitIdentityResolver({ gitAuthor: 'only-cfg' })
+
+    expect(() => resolve()).toThrow(/成对/)
+  })
+
+  it('env 与 config.json 同时提供 → env 优先（覆盖层，docker/CI 通道）', () => {
+    process.env.AFK_GIT_AUTHOR = 'env-name'
+    process.env.AFK_GIT_EMAIL = 'env@example.com'
+
+    const resolve = createGitIdentityResolver({
+      gitAuthor: 'cfg-name',
+      gitEmail: 'cfg@example.com',
+    })
+
+    expect(resolve()).toEqual({ name: 'env-name', email: 'env@example.com' })
   })
 
   it('同一 resolver 二次调用返回首次解析结果（memoize）', () => {
     process.env.AFK_GIT_AUTHOR = 'first'
     process.env.AFK_GIT_EMAIL = 'first@example.com'
 
-    const resolve = createGitIdentityResolver()
+    const resolve = createGitIdentityResolver({})
     expect(resolve()).toEqual({ name: 'first', email: 'first@example.com' })
 
     // 解析后环境变化不影响已缓存结果

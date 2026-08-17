@@ -5,14 +5,15 @@
  * 双超时监守、会话落盘。
  */
 
+import type { Config } from './config.js'
+
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import os from 'node:os'
 import { dirname, join } from 'node:path'
 import stripAnsi from 'strip-ansi'
 
-import { config } from './config.js'
-import { resolveGitIdentity } from './identity.js'
+import { createGitIdentityResolver, type GitIdentity } from './identity.js'
 
 /** 事件对象：pi `--mode json` 事件流的一行（透传，只按需取字段） */
 export interface PiEvent {
@@ -379,16 +380,20 @@ export interface HostExecutorOptions {
  * 委托共享核心 runJsonlStage（分帧 / 解析 / 双超时 / 落盘 / 退出码归一全在共享层）。
  */
 export class HostExecutor {
+  private readonly config: Config
   private readonly spawnFn: SpawnFn
   private readonly idleMs: number
   private readonly completionMs: number
   private readonly sessionDir: string
+  private readonly resolveIdentity: () => GitIdentity
 
-  constructor(opts: HostExecutorOptions = {}) {
+  constructor(config: Config, opts: HostExecutorOptions = {}) {
+    this.config = config
     this.spawnFn = opts.spawnFn ?? spawn
     this.idleMs = opts.idleMs ?? config.idleTimeoutSec * 1000
     this.completionMs = opts.completionMs ?? config.completionTimeoutSec * 1000
     this.sessionDir = opts.sessionDir ?? config.sessionsDir
+    this.resolveIdentity = createGitIdentityResolver(config)
   }
 
   runStage(ctx: StageContext, hooks?: ExecutorHooks): Promise<StageResult> {
@@ -401,7 +406,7 @@ export class HostExecutor {
         '--model',
         ctx.model,
         '--thinking',
-        config.thinking,
+        this.config.thinking,
         ctx.prompt,
       ],
       spawnFn: this.spawnFn,
@@ -409,18 +414,18 @@ export class HostExecutor {
       completionMs: this.completionMs,
       sessionDir: this.sessionDir,
       cwd: ctx.cwd,
-      env: gitIdentityEnv(),
+      env: this.gitIdentityEnv(),
     })
   }
-}
 
-/** pi spawn 的 git 提交身份 env：作者/提交者一致，来自解析链（env > 宿主 global > 硬失败） */
-function gitIdentityEnv(): NodeJS.ProcessEnv {
-  const { name, email } = resolveGitIdentity()
-  return {
-    GIT_AUTHOR_NAME: name,
-    GIT_AUTHOR_EMAIL: email,
-    GIT_COMMITTER_NAME: name,
-    GIT_COMMITTER_EMAIL: email,
+  /** pi spawn 的 git 提交身份 env：作者/提交者一致，来自解析链（env > config.json > 宿主 global > 硬失败） */
+  private gitIdentityEnv(): NodeJS.ProcessEnv {
+    const { name, email } = this.resolveIdentity()
+    return {
+      GIT_AUTHOR_NAME: name,
+      GIT_AUTHOR_EMAIL: email,
+      GIT_COMMITTER_NAME: name,
+      GIT_COMMITTER_EMAIL: email,
+    }
   }
 }

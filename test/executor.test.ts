@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { DEFAULT_CONFIG } from '../src/config.js'
 import {
   HostExecutor,
   JsonlSplitter,
@@ -18,6 +19,9 @@ import {
   parseEvent,
   parseSessionHead,
 } from '../src/executor.js'
+
+/** 测试配置：内置默认（thinking/sessionsDir/超时由 opts 覆盖） */
+const cfg = { ...DEFAULT_CONFIG }
 
 type FakeChild = EventEmitter & {
   stdout: PassThrough
@@ -275,7 +279,7 @@ describe('HostExecutor 宿主后端（假 spawn）', () => {
   function makeExecutor(overrides: { idleMs?: number; completionMs?: number } = {}) {
     const child = makeFakeChild()
     const sessionDir = mkdtempSync(join(tmpdir(), 'afk-host-'))
-    const executor = new HostExecutor({
+    const executor = new HostExecutor(cfg, {
       spawnFn: () => child,
       idleMs: overrides.idleMs ?? 1000,
       completionMs: overrides.completionMs ?? 500,
@@ -369,7 +373,7 @@ describe('HostExecutor 宿主后端（假 spawn）', () => {
     errChild.stdout = new PassThrough()
     errChild.stderr = new PassThrough()
     errChild.kill = vi.fn()
-    const executor = new HostExecutor({
+    const executor = new HostExecutor(cfg, {
       spawnFn: () => errChild,
       idleMs: 1000,
       completionMs: 500,
@@ -398,7 +402,7 @@ describe('HostExecutor 宿主后端（假 spawn）', () => {
   it('注入 git 提交身份 env：作者/提交者 = 解析身份（AFK_GIT_*）', async () => {
     const child = makeFakeChild()
     let spawnEnv: NodeJS.ProcessEnv | undefined
-    const executor = new HostExecutor({
+    const executor = new HostExecutor(cfg, {
       spawnFn: (_cmd, _args, opts) => {
         spawnEnv = opts.env
         return child

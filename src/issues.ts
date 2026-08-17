@@ -1,9 +1,9 @@
+import type { Config } from './config.js'
+
 import { execa } from 'execa'
 import { unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-
-import { config } from './config.js'
 
 export interface Issue {
   number: number
@@ -18,8 +18,8 @@ async function gh(args: string[]): Promise<string> {
   return stdout
 }
 
-/** 拉取待处理 issue：含 agent:todo，且不含 done/failed（label 状态机入口） */
-export async function listTodoIssues(): Promise<Issue[]> {
+/** 拉取待处理 issue：含 todo label，且不含 done/failed（label 状态机入口） */
+export async function listTodoIssues(config: Config): Promise<Issue[]> {
   const raw = await gh([
     'issue',
     'list',

@@ -1,9 +1,9 @@
+import type { Config } from './config.js'
 import type { Issue } from './issues.js'
 
 import { isAbsolute, relative } from 'node:path'
 import pMap from 'p-map'
 
-import { config } from './config.js'
 import { HostExecutor, type StageResult } from './executor.js'
 import {
   archiveWorktree,
@@ -60,7 +60,7 @@ const HEARTBEAT_MS = 60_000
  * 翻转，不会被重复选中），无需 in-progress 状态；seen 集合兜底 label 翻转失败时
  * 防同批重选死循环。
  */
-export async function runAfk(maxIterations = 1): Promise<IssueResult[]> {
+export async function runAfk(config: Config, maxIterations = 1): Promise<IssueResult[]> {
   const iterations = Math.max(1, Math.floor(maxIterations))
   const results: IssueResult[] = []
   const seen = new Set<number>()
@@ -68,7 +68,7 @@ export async function runAfk(maxIterations = 1): Promise<IssueResult[]> {
   for (let iter = 0; iter < iterations; iter++) {
     let issues: Issue[]
     try {
-      issues = await listTodoIssues()
+      issues = await listTodoIssues(config)
     } catch (error) {
       logError(`拉取 issue 失败：${error instanceof Error ? error.message : error}`)
       break
@@ -87,7 +87,7 @@ export async function runAfk(maxIterations = 1): Promise<IssueResult[]> {
     // 消除同仓库并发 fetch 撞 ref 事务锁的竞态（issue #74）；失败 = 宿主级故障，中止本轮
     let baseSha: string
     try {
-      baseSha = await fetchBase()
+      baseSha = await fetchBase(config)
     } catch (error) {
       logError(`fetch 基线失败：${error instanceof Error ? error.message : error}`)
       break
@@ -105,7 +105,7 @@ export async function runAfk(maxIterations = 1): Promise<IssueResult[]> {
       batch,
       async (issue): Promise<IssueResult> => {
         try {
-          return await processIssue(issue, baseSha)
+          return await processIssue(config, issue, baseSha)
         } catch (error) {
           logError(`#${issue.number} 处理异常：${error instanceof Error ? error.message : error}`)
           return { issue, status: 'failed', error: String(error) }
@@ -118,23 +118,23 @@ export async function runAfk(maxIterations = 1): Promise<IssueResult[]> {
   return results
 }
 
-async function processIssue(issue: Issue, baseSha: string): Promise<IssueResult> {
-  const logger = beginIssueLog(issue.number)
-  const branch = branchName(issue)
+async function processIssue(config: Config, issue: Issue, baseSha: string): Promise<IssueResult> {
+  const logger = beginIssueLog(issue.number, config.logsDir)
+  const branch = branchName(config, issue)
   let worktree: string | undefined
   let worktreeArchived = false
   let currentStage = 'git'
   try {
     logger.log(`开始（${branch}）`)
-    worktree = await createWorktree(branch, baseSha)
+    worktree = await createWorktree(config, branch, baseSha)
 
     // 宿主侧装依赖（编排层负责，agent 不自装）
     currentStage = 'install'
-    await installDeps(worktree, logger.log)
+    await installDeps(worktree, config, logger.log)
 
     // 单阶段 implementer：写代码 + 验证 + 提交
     currentStage = 'implementer'
-    await implementerPhase(worktree, branch, issue, logger)
+    await implementerPhase(config, worktree, branch, issue, logger)
 
     // 宿主 push 分支
     currentStage = 'push'
@@ -175,7 +175,7 @@ async function processIssue(issue: Issue, baseSha: string): Promise<IssueResult>
     logger.logError(`失败：${message}`)
 
     // 失败现场归档 + 删本地分支（改回 todo 重跑不被残留卡住）
-    const archivePath = worktree ? await archiveWorktree(worktree, branch) : undefined
+    const archivePath = worktree ? await archiveWorktree(config, worktree, branch) : undefined
     if (archivePath) worktreeArchived = true
     await deleteBranch(branch)
 
@@ -264,6 +264,7 @@ function failureInfo(
  * agent 完整事件流留在 session 文件，不重复落盘。
  */
 async function implementerPhase(
+  config: Config,
   worktree: string,
   branch: string,
   issue: Issue,
@@ -277,7 +278,7 @@ async function implementerPhase(
   }, HEARTBEAT_MS)
   let result: StageResult
   try {
-    result = await new HostExecutor().runStage(
+    result = await new HostExecutor(config).runStage(
       {
         prompt: implementerPrompt(issue, branch),
         model: config.model,

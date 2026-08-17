@@ -1,8 +1,6 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { config } from './config.js'
-
 /** issue 级日志器：追加写入 .pi/afk/logs/issue-<编号>.log，同时透传终端。 */
 export interface IssueLogger {
   log(msg: string): void
@@ -28,12 +26,12 @@ export function logError(msg: string): void {
 }
 
 /**
- * 开始一个 issue 的日志：truncate `.pi/afk/logs/issue-<编号>.log`（跨 run 覆盖写，
+ * 开始一个 issue 的日志：truncate `<logsDir>/issue-<编号>.log`（跨 run 覆盖写，
  * 文件始终反映最近一次处理；一次运行内同一 issue 只处理一次，无同 run 冲突）。
  * 返回追加写该文件并透传终端的日志器；落盘失败时降级为纯终端，不阻塞编排。
  */
-export function beginIssueLog(number: number): IssueLogger {
-  const file = resolve(config.logsDir, `issue-${number}.log`)
+export function beginIssueLog(number: number, logsDir: string): IssueLogger {
+  const file = resolve(logsDir, `issue-${number}.log`)
   let agentBuf = ''
   const logger: IssueLogger = {
     file,
@@ -65,7 +63,7 @@ export function beginIssueLog(number: number): IssueLogger {
     },
   }
   try {
-    mkdirSync(resolve(config.logsDir), { recursive: true })
+    mkdirSync(resolve(logsDir), { recursive: true })
     writeFileSync(file, '')
   } catch {
     // 落盘失败：日志器仍可用，只打终端

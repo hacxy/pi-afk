@@ -8,14 +8,6 @@ import { beginIssueLog, log, logError } from '../src/log.js'
 /** 测试用 logsDir（真实临时目录，行为贴近生产：落盘 + 读取） */
 const cfg = vi.hoisted(() => ({ logsDir: '' }))
 
-vi.mock('../src/config.js', () => ({
-  config: {
-    get logsDir() {
-      return cfg.logsDir
-    },
-  },
-}))
-
 let logFile: string
 
 beforeEach(() => {
@@ -30,7 +22,7 @@ afterEach(() => {
 
 describe('logAgent 行缓冲（agent 正文增量落盘）', () => {
   it('跨 chunk 的半行先缓冲，凑成完整行才写入（不产生中间碎片行）', () => {
-    const logger = beginIssueLog(12)
+    const logger = beginIssueLog(12, cfg.logsDir)
     logger.logAgent('hello ')
     expect(readFileSync(logFile, 'utf8')).toBe('')
 
@@ -42,7 +34,7 @@ describe('logAgent 行缓冲（agent 正文增量落盘）', () => {
   })
 
   it('flushAgent 冲刷无换行结尾的残留半行（补 \n 保证后续 append 从新行开始），且幂等（二次调用无副作用）', () => {
-    const logger = beginIssueLog(12)
+    const logger = beginIssueLog(12, cfg.logsDir)
     logger.logAgent('first\nsecond')
     expect(readFileSync(logFile, 'utf8')).toBe('first\n')
 
@@ -54,7 +46,7 @@ describe('logAgent 行缓冲（agent 正文增量落盘）', () => {
   })
 
   it('空行不写入（\n 之间的空段跳过，与生命周期日志行为一致）', () => {
-    const logger = beginIssueLog(12)
+    const logger = beginIssueLog(12, cfg.logsDir)
     logger.logAgent('a\n\nb\n')
     expect(readFileSync(logFile, 'utf8')).toBe('a\nb\n')
   })
@@ -62,7 +54,7 @@ describe('logAgent 行缓冲（agent 正文增量落盘）', () => {
 
 describe('前缀结构化（归属从消息文本约定升级为结构保证）', () => {
   it('issue 级日志统一 [时间] [#N] 前缀，错误带 ✗', () => {
-    const logger = beginIssueLog(12)
+    const logger = beginIssueLog(12, cfg.logsDir)
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     logger.log('开始')
@@ -89,7 +81,7 @@ describe('前缀结构化（归属从消息文本约定升级为结构保证）'
   })
 
   it('issue 级日志也落盘到对应文件，正文与生命周期混排同文件', () => {
-    const logger = beginIssueLog(12)
+    const logger = beginIssueLog(12, cfg.logsDir)
     logger.log('开始')
     logger.logAgent('agent 第一行\n')
     const content = readFileSync(logFile, 'utf8')

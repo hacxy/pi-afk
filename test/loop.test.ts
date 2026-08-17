@@ -26,6 +26,7 @@ vi.mock('../src/issues.js', () => ({
 }))
 vi.mock('../src/log.js', () => ({ beginIssueLog: vi.fn(), log: vi.fn(), logError: vi.fn() }))
 
+import { DEFAULT_CONFIG } from '../src/config.js'
 import { HostExecutor } from '../src/executor.js'
 import {
   archiveWorktree,
@@ -53,6 +54,9 @@ const issue: Issue = {
   body: '导航链接有背景色，需要去掉。',
   labels: ['agent:todo'],
 }
+
+/** 测试配置：内置默认（labels/baseBranch/maxParallel=2 等） */
+const cfg = { ...DEFAULT_CONFIG }
 
 const BASE_SHA = '1db529b480283a4d1c8d1bc9422962fbe950492e'
 
@@ -100,16 +104,16 @@ beforeEach(() => {
 
 describe('runAfk 单阶段 pipeline（宿主后端）', () => {
   it('成功：worktree → 宿主装依赖 → 单阶段 implementer → push → 开 PR → done label + comment + 清理', async () => {
-    const results = await runAfk()
+    const results = await runAfk(cfg)
     expect(results[0].status).toBe('done')
 
     // 基线每迭代只 fetch 一次（串行），批内不再各自 fetch；sha 传入 worktree 创建
     expect(fetchBase).toHaveBeenCalledTimes(1)
-    expect(createWorktree).toHaveBeenCalledWith('afk/issue-52', BASE_SHA)
+    expect(createWorktree).toHaveBeenCalledWith(cfg, 'afk/issue-52', BASE_SHA)
 
     // 宿主侧装依赖（编排层负责，agent 不自装），在 worktree 里执行
     expect(installDeps).toHaveBeenCalledTimes(1)
-    expect(installDeps).toHaveBeenCalledWith('/tmp/wt', expect.any(Function)) // 注入 issue 级日志器
+    expect(installDeps).toHaveBeenCalledWith('/tmp/wt', cfg, expect.any(Function)) // 注入 issue 级日志器
 
     // 单阶段：只有 implementer，且 cwd=worktree（pi 在 worktree 里读写文件）
     const executor = executors[0]
@@ -159,7 +163,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
       return executor as unknown as InstanceType<typeof HostExecutor>
     })
 
-    const results = await runAfk()
+    const results = await runAfk(cfg)
     expect(results[0].status).toBe('failed')
     expect(results[0].error).toContain('implementer 退出码 1')
 
@@ -167,7 +171,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
     expect(openPr).not.toHaveBeenCalled()
 
     // 失败现场归档 + 删本地分支（改回 todo 能干净重跑）
-    expect(archiveWorktree).toHaveBeenCalledWith('/tmp/wt', 'afk/issue-52')
+    expect(archiveWorktree).toHaveBeenCalledWith(cfg, '/tmp/wt', 'afk/issue-52')
     expect(deleteBranch).toHaveBeenCalledWith('afk/issue-52')
     expect(removeWorktree).not.toHaveBeenCalled() // 已归档，不再 remove
 
@@ -188,7 +192,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
   it('依赖安装失败 → 归档 + 删分支 + 失败 comment（阶段 install），不跑任何阶段', async () => {
     vi.mocked(installDeps).mockRejectedValue(new Error('依赖安装失败（1）'))
 
-    const results = await runAfk()
+    const results = await runAfk(cfg)
     expect(results[0].status).toBe('failed')
     expect(results[0].error).toContain('依赖安装失败')
     expect(executors).toHaveLength(0) // 没创建 HostExecutor，没跑 implementer
@@ -203,12 +207,12 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
   it('多 issue：每个 issue 各建 worktree、各装一次依赖、各开一个 PR', async () => {
     const issue2: Issue = { ...issue, number: 53, title: '另一件事' }
     vi.mocked(listTodoIssues).mockReturnValue([issue, issue2])
-    vi.mocked(branchName).mockImplementation((i) =>
+    vi.mocked(branchName).mockImplementation((_c, i) =>
       i.number === 52 ? 'afk/issue-52' : 'afk/issue-53',
     )
-    vi.mocked(createWorktree).mockImplementation((branch) => `/tmp/wt-${branch.split('-')[2]}`)
+    vi.mocked(createWorktree).mockImplementation((_c, branch) => `/tmp/wt-${branch.split('-')[2]}`)
 
-    const results = await runAfk(1)
+    const results = await runAfk(cfg, 1)
     expect(results).toHaveLength(2)
     expect(results.every((r) => r.status === 'done')).toBe(true)
 
@@ -223,11 +227,11 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
   it('maxIterations 默认 1：一次迭代 = 并发处理至多 maxParallel 个 issue', async () => {
     const issue2: Issue = { ...issue, number: 53, title: '另一件事' }
     vi.mocked(listTodoIssues).mockReturnValue([issue, issue2])
-    vi.mocked(branchName).mockImplementation((i) =>
+    vi.mocked(branchName).mockImplementation((_c, i) =>
       i.number === 52 ? 'afk/issue-52' : 'afk/issue-53',
     )
 
-    const results = await runAfk()
+    const results = await runAfk(cfg)
 
     expect(results).toHaveLength(2) // 一次迭代 = 整批并发（maxParallel=2）
     expect(results.every((r) => r.status === 'done')).toBe(true)
@@ -246,9 +250,9 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
       .mockReturnValueOnce(issues)
       .mockReturnValueOnce(issues)
       .mockReturnValue([]) // 第三批已无待办（label 翻转后）
-    vi.mocked(branchName).mockImplementation((i) => `afk/issue-${i.number}`)
+    vi.mocked(branchName).mockImplementation((_c, i) => `afk/issue-${i.number}`)
 
-    const results = await runAfk(3)
+    const results = await runAfk(cfg, 3)
 
     expect(results).toHaveLength(3)
     expect(results.every((r) => r.status === 'done')).toBe(true)
@@ -261,11 +265,11 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
   it('批间重拉：第二批感知 label 翻转，不再选已处理的 issue', async () => {
     const issue2: Issue = { ...issue, number: 53, title: '另一件事' }
     vi.mocked(listTodoIssues).mockReturnValueOnce([issue]).mockReturnValueOnce([issue2])
-    vi.mocked(branchName).mockImplementation((i) =>
+    vi.mocked(branchName).mockImplementation((_c, i) =>
       i.number === 52 ? 'afk/issue-52' : 'afk/issue-53',
     )
 
-    const results = await runAfk(2)
+    const results = await runAfk(cfg, 2)
 
     expect(results.map((r) => r.issue.number)).toEqual([52, 53])
     expect(listTodoIssues).toHaveBeenCalledTimes(2)
@@ -274,7 +278,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
   it('label 翻转失败兜底：seen 防同批重选死循环，提前结束', async () => {
     vi.mocked(listTodoIssues).mockReturnValue([issue]) // 永远返回同一个（label 没翻转）
 
-    const results = await runAfk(5)
+    const results = await runAfk(cfg, 5)
 
     expect(results).toHaveLength(1)
     expect(listTodoIssues).toHaveBeenCalledTimes(2) // 第二次拉到 seen 内 → 终止
@@ -284,7 +288,7 @@ describe('runAfk 单阶段 pipeline（宿主后端）', () => {
   it('fetch 基线失败：中止本轮，不建 worktree、不跑 implementer、不开 PR', async () => {
     vi.mocked(fetchBase).mockRejectedValue(new Error('fetch origin main 失败'))
 
-    const results = await runAfk()
+    const results = await runAfk(cfg)
 
     expect(results).toHaveLength(0)
     expect(createWorktree).not.toHaveBeenCalled()

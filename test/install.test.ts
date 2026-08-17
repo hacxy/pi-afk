@@ -7,7 +7,11 @@ vi.mock('execa', () => ({ execa: vi.fn() }))
 
 import { execa } from 'execa'
 
+import { DEFAULT_CONFIG } from '../src/config.js'
 import { installCommand, installDeps } from '../src/install.js'
+
+/** 测试配置：内置默认（installCmd 缺省 → 按 lockfile 检测） */
+const cfg = { ...DEFAULT_CONFIG }
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -44,7 +48,7 @@ describe('installDeps（宿主侧安装）', () => {
     writeFileSync(join(wt, 'pnpm-lock.yaml'), '')
     vi.mocked(execa).mockResolvedValue({ stdout: '', stderr: '' } as never)
 
-    await expect(installDeps(wt)).resolves.toBeUndefined()
+    await expect(installDeps(wt, cfg)).resolves.toBeUndefined()
 
     expect(execa).toHaveBeenCalledWith(
       'pnpm',
@@ -61,6 +65,6 @@ describe('installDeps（宿主侧安装）', () => {
     writeFileSync(join(wt, 'pnpm-lock.yaml'), '')
     vi.mocked(execa).mockRejectedValue({ exitCode: 1, stderr: 'ERR! 依赖解析失败' })
 
-    await expect(installDeps(wt)).rejects.toThrow(/依赖安装失败（1）/)
+    await expect(installDeps(wt, cfg)).rejects.toThrow(/依赖安装失败（1）/)
   })
 })
