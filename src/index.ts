@@ -4,6 +4,7 @@ export { CONFIG_FILE, DEFAULT_CONFIG, THINKING_LEVELS, loadConfig, type Config }
 export { createGitIdentityResolver, type GitIdentity } from './identity.js'
 export { ensureGitignore, runInit, type InitResult } from './init.js'
 export { installCommand, installDeps } from './install.js'
+export { ensureLabels } from './issues.js'
 export { implementerFixPrompt, implementerPrompt, mergerPrompt, reviewerPrompt } from './prompts.js'
 export { compareUrl, failureComment, successComment } from './report.js'
 export {

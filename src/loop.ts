@@ -21,6 +21,7 @@ import { installDeps } from './install.js'
 import {
   addComment,
   addLabel,
+  ensureLabels,
   listTodoIssues,
   mergePr,
   openPr,
@@ -91,6 +92,19 @@ class MergeQueue {
  * 防同批重选死循环。
  */
 export async function runAfk(config: Config, maxIterations = 1): Promise<IssueResult[]> {
+  // 幂等补建状态机 label（进程级一次）：todo 建不上 → 硬失败（否则静默空跑浪费迭代）；
+  // 其余建不上 → 警告继续（附属状态标记，不阻塞主流程）
+  const ensure = await ensureLabels(config)
+  const todoFailed = ensure.failed.find((f) => f.name === config.todoLabel)
+  if (todoFailed) {
+    throw new Error(
+      `label 状态机就绪失败：${config.todoLabel} 无法创建（${todoFailed.error}）\n` +
+        '请确认 gh 已登录且对该仓库有写权限，或手动创建该 label 后重跑',
+    )
+  }
+  for (const f of ensure.failed) logError(`label ${f.name} 创建失败（不影响主流程）：${f.error}`)
+  if (ensure.created.length > 0) log(`已补建 label：${ensure.created.join('、')}`)
+
   const iterations = Math.max(1, Math.floor(maxIterations))
   const results: IssueResult[] = []
   const seen = new Set<number>()

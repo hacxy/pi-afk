@@ -1,9 +1,11 @@
 import { execa } from 'execa'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { DEFAULT_CONFIG } from '../src/config.js'
 import {
   analyzeChecks,
   checksState,
+  ensureLabels,
   mergePr,
   prMergeable,
   waitForChecksPass,
@@ -123,5 +125,80 @@ describe('mergePr / prMergeable', () => {
 
     mockExeca.mockResolvedValueOnce({ stdout: 'garbage' })
     await expect(prMergeable(12)).resolves.toBe('UNKNOWN')
+  })
+})
+
+describe('ensureLabels（幂等补建）', () => {
+  it('全缺 → 建 4 个（语义色 + 描述），created 返回全部', async () => {
+    mockExeca.mockResolvedValue({ stdout: '' }) // list 空 → 全缺
+    await expect(ensureLabels(DEFAULT_CONFIG)).resolves.toEqual({
+      created: ['agent:todo', 'agent:done', 'agent:failed', 'agent:merged'],
+      failed: [],
+    })
+
+    const creates = mockExeca.mock.calls.filter(
+      (call) => call[1][0] === 'label' && call[1][1] === 'create',
+    )
+    expect(creates).toHaveLength(4)
+    // 首建 todo：带语义色与描述
+    expect(mockExeca).toHaveBeenCalledWith('gh', [
+      'label',
+      'create',
+      'agent:todo',
+      '--color',
+      '#FBCA04',
+      '--description',
+      'afk: queued for work',
+    ])
+  })
+
+  it('已存在部分 → 只补缺失，不重建已有（尊重用户自定义）', async () => {
+    mockExeca.mockResolvedValue({ stdout: 'agent:todo\nagent:done\n' })
+    await expect(ensureLabels(DEFAULT_CONFIG)).resolves.toEqual({
+      created: ['agent:failed', 'agent:merged'],
+      failed: [],
+    })
+    expect(mockExeca).toHaveBeenCalledTimes(1 + 2) // 1 次 list + 2 次 create
+  })
+
+  it('单个 create 失败 → 收集进 failed，不中断其余', async () => {
+    mockExeca
+      .mockResolvedValueOnce({ stdout: '' }) // list
+      .mockRejectedValueOnce(new Error('not found')) // todo create 失败
+      .mockResolvedValueOnce({ stdout: '' })
+      .mockResolvedValueOnce({ stdout: '' })
+      .mockResolvedValueOnce({ stdout: '' })
+    await expect(ensureLabels(DEFAULT_CONFIG)).resolves.toEqual({
+      created: ['agent:done', 'agent:failed', 'agent:merged'],
+      failed: [{ name: 'agent:todo', error: 'not found' }],
+    })
+  })
+
+  it('拉取 label 列表失败 → 直接抛错（无法判断缺失，不盲目建）', async () => {
+    mockExeca.mockRejectedValue(new Error('gh: not a git repository'))
+    await expect(ensureLabels(DEFAULT_CONFIG)).rejects.toThrow(/拉取 label 列表失败/)
+  })
+
+  it('使用配置化的 label 名（AFK_* / config.json 可定制）', async () => {
+    mockExeca.mockResolvedValue({ stdout: '' })
+    await ensureLabels({ ...DEFAULT_CONFIG, todoLabel: 'queue', doneLabel: 'ship' })
+    expect(mockExeca).toHaveBeenCalledWith('gh', [
+      'label',
+      'create',
+      'queue',
+      '--color',
+      '#FBCA04',
+      '--description',
+      'afk: queued for work',
+    ])
+    expect(mockExeca).toHaveBeenCalledWith('gh', [
+      'label',
+      'create',
+      'ship',
+      '--color',
+      '#0E8A16',
+      '--description',
+      'afk: completed',
+    ])
   })
 })

@@ -22,6 +22,7 @@ vi.mock('../src/git.js', () => ({
 vi.mock('../src/issues.js', () => ({
   addComment: vi.fn(),
   addLabel: vi.fn(),
+  ensureLabels: vi.fn(),
   listTodoIssues: vi.fn(),
   mergePr: vi.fn(),
   openPr: vi.fn(),
@@ -50,6 +51,7 @@ import { installDeps } from '../src/install.js'
 import {
   addComment,
   addLabel,
+  ensureLabels,
   listTodoIssues,
   mergePr,
   openPr,
@@ -58,7 +60,7 @@ import {
   repoName,
   waitForChecksPass,
 } from '../src/issues.js'
-import { beginIssueLog } from '../src/log.js'
+import { beginIssueLog, log, logError } from '../src/log.js'
 
 const issue: Issue = {
   number: 52,
@@ -104,6 +106,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   executors = []
   stageQueue = []
+  vi.mocked(ensureLabels).mockResolvedValue({ created: [], failed: [] })
   vi.mocked(listTodoIssues).mockReturnValue([issue])
   vi.mocked(branchName).mockReturnValue('afk/issue-52')
   vi.mocked(fetchBase).mockResolvedValue(BASE_SHA)
@@ -324,6 +327,51 @@ describe('runAfk 完整 pipeline（宿主后端，autoMerge=false 默认）', ()
     expect(openPr).not.toHaveBeenCalled()
     expect(vi.mocked(addComment).mock.calls[0][1]).toContain('install')
     expect(addLabel).toHaveBeenCalledWith(52, 'agent:failed')
+  })
+})
+
+describe('runAfk 启动 ensureLabels（幂等补建状态机 label）', () => {
+  it('启动时调用一次，成功补建后打印已建列表并继续', async () => {
+    vi.mocked(ensureLabels).mockResolvedValue({
+      created: ['agent:failed', 'agent:merged'],
+      failed: [],
+    })
+    vi.mocked(listTodoIssues).mockReturnValue([]) // 无待处理 → 流程自然结束
+
+    const results = await runAfk(cfg)
+    expect(ensureLabels).toHaveBeenCalledWith(cfg)
+    expect(results).toEqual([])
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('agent:failed'))
+  })
+
+  it('todo label 创建失败 → 硬失败：不拉 issue、不跑任何阶段', async () => {
+    vi.mocked(ensureLabels).mockResolvedValue({
+      created: [],
+      failed: [{ name: 'agent:todo', error: 'gh: not found' }],
+    })
+
+    await expect(runAfk(cfg)).rejects.toThrow(/agent:todo/)
+    expect(listTodoIssues).not.toHaveBeenCalled()
+    expect(executors).toHaveLength(0)
+  })
+
+  it('非 todo label 创建失败 → logError 警告后继续跑', async () => {
+    vi.mocked(ensureLabels).mockResolvedValue({
+      created: [],
+      failed: [{ name: 'agent:merged', error: 'permission denied' }],
+    })
+
+    const results = await runAfk(cfg)
+    expect(logError).toHaveBeenCalledWith(expect.stringContaining('agent:merged'))
+    // 主流程照常：拉 issue 并处理
+    expect(listTodoIssues).toHaveBeenCalledTimes(1)
+    expect(results[0].status).toBe('done')
+  })
+
+  it('拉取 label 列表本身失败 → 直接抛错', async () => {
+    vi.mocked(ensureLabels).mockRejectedValue(new Error('拉取 label 列表失败：gh down'))
+
+    await expect(runAfk(cfg)).rejects.toThrow(/拉取 label 列表失败/)
   })
 })
 

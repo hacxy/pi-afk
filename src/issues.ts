@@ -193,3 +193,45 @@ export async function waitForChecksPass(
 export async function mergePr(number: number): Promise<void> {
   await gh(['pr', 'merge', String(number), '--squash', '--delete-branch'])
 }
+
+/** 状态机 label 的语义色/描述（只用于新建，不覆盖已有同名 label 的用户自定义样式） */
+function labelMeta(config: Config): Array<[name: string, color: string, desc: string]> {
+  return [
+    [config.todoLabel, '#FBCA04', 'afk: queued for work'],
+    [config.doneLabel, '#0E8A16', 'afk: completed'],
+    [config.failedLabel, '#B60205', 'afk: failed, needs attention'],
+    [config.mergedLabel, '#5319E7', 'afk: PR merged'],
+  ]
+}
+
+/**
+ * 幂等补建状态机 label（补缺原则）：gh label list 拉现有 → 只创建缺失的，
+ * 已有同名 label（含用户自定义颜色/描述）不动。单个创建失败收集进 failed 不中断，
+ * 失败策略由调用方决定（loop：todo 失败硬失败、其余警告；init：任何失败硬失败）。
+ */
+export async function ensureLabels(config: Config): Promise<{
+  created: string[]
+  failed: { name: string; error: string }[]
+}> {
+  const out = await gh(['label', 'list', '--json', 'name', '--jq', '.[].name']).catch((e) => {
+    throw new Error(`拉取 label 列表失败：${e instanceof Error ? e.message : String(e)}`)
+  })
+  const have = new Set(
+    out
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0),
+  )
+  const created: string[] = []
+  const failed: { name: string; error: string }[] = []
+  for (const [name, color, desc] of labelMeta(config)) {
+    if (have.has(name)) continue
+    try {
+      await gh(['label', 'create', name, '--color', color, '--description', desc])
+      created.push(name)
+    } catch (e) {
+      failed.push({ name, error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  return { created, failed }
+}

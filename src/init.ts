@@ -2,7 +2,8 @@ import { execaSync } from 'execa'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { CONFIG_FILE, DEFAULT_CONFIG } from './config.js'
+import { CONFIG_FILE, DEFAULT_CONFIG, type Config } from './config.js'
+import { ensureLabels } from './issues.js'
 
 export interface InitResult {
   /** 生成的 config.json 绝对路径 */
@@ -11,6 +12,8 @@ export interface InitResult {
   baseBranch: string
   /** gitignore 维护动作：created / appended / replaced / unchanged */
   gitignore: 'created' | 'appended' | 'replaced' | 'unchanged'
+  /** 本次补建的状态机 label（已存在的未计入） */
+  labelsCreated: string[]
 }
 
 /** gitignore 自动维护块：运行时产物忽略 + config.json 例外（可入库） */
@@ -66,9 +69,13 @@ export function ensureGitignore(cwd: string): InitResult['gitignore'] {
  * - 必须位于 git 仓库内（afk 全家桶依赖 git/gh）
  * - baseBranch 探测 origin/HEAD，失败回落 main
  * - 写 <cwd>/.pi/afk/config.json（全量默认值模板，含探测的 baseBranch）
+ * - 幂等补建状态机 label（gh label list → 只建缺失）；任何失败 → 抛错（开箱即用目标）
  * - 已存在且无 --force → 报错
  */
-export function runInit(cwd: string = process.cwd(), opts: { force?: boolean } = {}): InitResult {
+export async function runInit(
+  cwd: string = process.cwd(),
+  opts: { force?: boolean } = {},
+): Promise<InitResult> {
   const inRepo = execaSync('git', ['rev-parse', '--is-inside-work-tree'], {
     cwd,
     reject: false,
@@ -88,11 +95,20 @@ export function runInit(cwd: string = process.cwd(), opts: { force?: boolean } =
   if (existsSync(configPath) && !opts.force) {
     throw new Error(`配置已存在 ${configPath}\n如需覆盖为默认值：afk init --force`)
   }
-  const template = { ...DEFAULT_CONFIG, baseBranch }
+  const template: Config = { ...DEFAULT_CONFIG, baseBranch }
   mkdirSync(join(cwd, '.pi', 'afk'), { recursive: true })
   writeFileSync(configPath, `${JSON.stringify(template, null, 2)}\n`)
 
-  return { configPath, baseBranch, gitignore }
+  // 幂等补建状态机 label：任何失败都算初始化不完整（开箱即用目标）
+  const { created, failed } = await ensureLabels(template)
+  if (failed.length > 0) {
+    throw new Error(
+      `label 创建失败：\n${failed.map((f) => `- ${f.name}: ${f.error}`).join('\n')}\n` +
+        '请确认 gh 已登录且对该仓库有写权限（或手动 gh label create 后重跑 afk init）',
+    )
+  }
+
+  return { configPath, baseBranch, gitignore, labelsCreated: created }
 }
 
 /** 探测 origin/HEAD 的默认分支名（refs/heads/<name>），无则回落内置 main */

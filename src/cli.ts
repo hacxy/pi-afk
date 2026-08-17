@@ -80,14 +80,19 @@ function main(): void {
     })
 
   cli
-    .command('init', '初始化 .pi/afk/config.json（含 gitignore 白名单自动维护）')
+    .command('init', '初始化 .pi/afk/config.json（含 gitignore 白名单 + 状态机 label 幂等补建）')
     .option('--force', '覆盖已存在的配置为默认值')
-    .action((options: { force?: boolean }) => {
+    .action(async (options: { force?: boolean }) => {
       try {
-        const result = runInit(process.cwd(), { force: options.force })
+        const result = await runInit(process.cwd(), { force: options.force })
         log(`✓ 已生成配置 ${result.configPath}`)
         log(`  baseBranch: ${result.baseBranch}（origin/HEAD 探测，无则回落 main）`)
         log(`  .gitignore: ${GITIGNORE_DESC[result.gitignore]}`)
+        if (result.labelsCreated.length > 0) {
+          log(`  labels: 已补建 ${result.labelsCreated.join('、')}`)
+        } else {
+          log('  labels: 均已存在，无需创建')
+        }
         log('提示：秘密（API key / GH token）请用环境变量提供（如 GH_TOKEN），config.json 不含秘密')
       } catch (error) {
         logError(error instanceof Error ? error.message : String(error))

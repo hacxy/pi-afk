@@ -152,20 +152,37 @@ describe('cac CLI 冒烟', () => {
     expect(stdout).toContain('0.1.0')
   })
 
-  it('init 命令：在 git 仓库内生成 config.json 且 exit 0', async () => {
+  it('init 命令：在 git 仓库内生成 config.json + 幂等补建 label 且 exit 0', async () => {
     const { execSync } = await import('node:child_process')
-    const { mkdtempSync, existsSync } = await import('node:fs')
+    const { mkdirSync, mkdtempSync, existsSync, writeFileSync } = await import('node:fs')
     const { tmpdir } = await import('node:os')
-    const { join } = await import('node:path')
+    const { delimiter, join } = await import('node:path')
     const dir = mkdtempSync(join(tmpdir(), 'afk-cli-init-'))
-    execSync('git init -q', { cwd: dir, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' } })
+    execSync('git init -q', {
+      cwd: dir,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+    })
+    // 假 gh shim：模拟 label list（无现有）与 label create（成功），隔离真实 GitHub
+    const bin = join(dir, '.bin')
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n')
+    execSync('chmod +x .bin/gh', { cwd: dir })
     // tsx 二进制与 cli 入口都用绝对路径（tmp cwd 下无法解析裸 'tsx' 包）
     const tsx = join(process.cwd(), 'node_modules', '.bin', 'tsx')
     const cli = resolve('src/cli.ts')
 
-    const stdout = execSync(`"${tsx}" "${cli}" init`, { cwd: dir, encoding: 'utf8' })
+    const stdout = execSync(`"${tsx}" "${cli}" init`, {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}${delimiter}${process.env.PATH}`,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+      },
+    })
 
     expect(stdout).toContain('已生成配置')
+    expect(stdout).toContain('已补建 agent:todo')
     expect(existsSync(join(dir, '.pi', 'afk', 'config.json'))).toBe(true)
     execSync(`rm -rf "${dir}"`)
   })
