@@ -1,49 +1,9 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import { loadConfig } from '../src/config.js'
-
-/** 配置相关环境变量：每个测试后恢复，防止串扰 */
-const ENV_KEYS = [
-  'AFK_MODEL',
-  'AFK_THINKING',
-  'AFK_MAX_PARALLEL',
-  'AFK_TODO_LABEL',
-  'AFK_DONE_LABEL',
-  'AFK_FAILED_LABEL',
-  'AFK_BRANCH_PREFIX',
-  'AFK_BASE_BRANCH',
-  'AFK_WORKTREES_DIR',
-  'AFK_FAILED_DIR',
-  'AFK_LOGS_DIR',
-  'AFK_SESSIONS_DIR',
-  'AFK_INSTALL_CMD',
-  'AFK_IDLE_TIMEOUT_SEC',
-  'AFK_COMPLETION_TIMEOUT_SEC',
-  'AFK_AUTO_MERGE',
-  'AFK_MERGED_LABEL',
-  'AFK_REVIEWER_MODEL',
-  'AFK_MAX_REVIEW_ROUNDS',
-  'AFK_CONFLICT_TRIES',
-  'AFK_WAIT_FOR_CHECKS',
-  'AFK_MERGE_TIMEOUT_SEC',
-] as const
-
-const ORIGINAL = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
-
-beforeEach(() => {
-  for (const key of ENV_KEYS) delete process.env[key]
-})
-
-afterEach(() => {
-  for (const key of ENV_KEYS) {
-    const original = ORIGINAL[key]
-    if (original === undefined) delete process.env[key]
-    else process.env[key] = original
-  }
-})
+import { DEFAULT_SANDBOX_ENV, loadConfig } from '../src/config.js'
 
 /** 建临时项目根目录（默认不含任何 afk 配置） */
 function tempCwd(): string {
@@ -74,6 +34,8 @@ describe('loadConfig 加载与校验', () => {
 
     expect(cfg).toEqual({
       model: 'deepseek/deepseek-v4-flash',
+      sandbox: true,
+      sandboxEnv: DEFAULT_SANDBOX_ENV,
       thinking: 'medium',
       maxParallel: 2,
       todoLabel: 'agent:todo',
@@ -100,6 +62,68 @@ describe('loadConfig 加载与校验', () => {
     expect(cfg.reviewerModel).toBeUndefined()
   })
 
+  it('空对象 {} → 沙箱默认开启 + 默认白名单 env，无资源限制', () => {
+    const cwd = tempCwd()
+    writeConfig(cwd, {})
+
+    const cfg = loadConfig(cwd)
+
+    expect(cfg.sandbox).toBe(true)
+    expect(cfg.sandboxEnv).toEqual(expect.arrayContaining(['DEEPSEEK_API_KEY']))
+    expect(cfg.sandboxMemory).toBeUndefined()
+    expect(cfg.sandboxCpus).toBeUndefined()
+  })
+
+  it('sandbox: false → 沙箱关闭（--local 的持久化形态）', () => {
+    const cwd = tempCwd()
+    writeConfig(cwd, { sandbox: false })
+    expect(loadConfig(cwd).sandbox).toBe(false)
+  })
+
+  it('sandboxEnv 自定义 → 覆盖默认白名单', () => {
+    const cwd = tempCwd()
+    writeConfig(cwd, { sandboxEnv: ['MY_CUSTOM_KEY', 'OTHER_SECRET'] })
+
+    const cfg = loadConfig(cwd)
+    expect(cfg.sandboxEnv).toEqual(['MY_CUSTOM_KEY', 'OTHER_SECRET'])
+  })
+
+  it('sandboxMemory/sandboxCpus 可选：合法值原样解析', () => {
+    const cwd = tempCwd()
+    writeConfig(cwd, { sandboxMemory: '4g', sandboxCpus: 2 })
+
+    const cfg = loadConfig(cwd)
+    expect(cfg.sandboxMemory).toBe('4g')
+    expect(cfg.sandboxCpus).toBe(2)
+  })
+
+  it('sandboxMemory 非字符串/sandboxCpus 非正整数 → 报错并定位键名', () => {
+    for (const bad of [
+      { sandboxMemory: 4 },
+      { sandboxMemory: '' },
+      { sandboxCpus: 0 },
+      { sandboxCpus: 1.5 },
+    ]) {
+      const cwd = tempCwd()
+      writeConfig(cwd, bad)
+      expect(() => loadConfig(cwd)).toThrow(/sandbox/)
+    }
+  })
+
+  it('AFK_* 环境变量不再覆盖任何配置（配置只读 config.json）', () => {
+    const cwd = tempCwd()
+    writeConfig(cwd, { model: 'file-model', maxParallel: 2 })
+    process.env.AFK_MODEL = 'env-model'
+    process.env.AFK_MAX_PARALLEL = '7'
+
+    const cfg = loadConfig(cwd)
+
+    expect(cfg.model).toBe('file-model') // env 彻底失效
+    expect(cfg.maxParallel).toBe(2)
+    delete process.env.AFK_MODEL
+    delete process.env.AFK_MAX_PARALLEL
+  })
+
   it('部分键 → 其余回落内置默认值', () => {
     const cwd = tempCwd()
     writeConfig(cwd, { model: 'file-model', baseBranch: 'develop' })
@@ -111,28 +135,6 @@ describe('loadConfig 加载与校验', () => {
     expect(cfg.thinking).toBe('medium')
     expect(cfg.maxParallel).toBe(2)
     expect(cfg.todoLabel).toBe('agent:todo')
-  })
-
-  it('env 覆盖 > config.json > 内置默认', () => {
-    const cwd = tempCwd()
-    writeConfig(cwd, { model: 'file-model', baseBranch: 'develop' })
-    process.env.AFK_MODEL = 'env-model'
-    process.env.AFK_MAX_PARALLEL = '7'
-
-    const cfg = loadConfig(cwd)
-
-    expect(cfg.model).toBe('env-model') // env 赢 config.json
-    expect(cfg.maxParallel).toBe(7) // env 赢默认（字符串数字已类型化）
-    expect(cfg.baseBranch).toBe('develop') // config.json 赢默认
-    expect(cfg.thinking).toBe('medium') // 默认
-  })
-
-  it('env 空串/空白视为未设置 → 不覆盖', () => {
-    const cwd = tempCwd()
-    writeConfig(cwd, { model: 'file-model' })
-    process.env.AFK_MODEL = '   '
-
-    expect(loadConfig(cwd).model).toBe('file-model')
   })
 
   it('未知键 → 报错并定位键名（zod .strict()）', () => {
@@ -155,14 +157,6 @@ describe('loadConfig 加载与校验', () => {
       writeConfig(cwd, { maxParallel: bad })
       expect(() => loadConfig(cwd)).toThrow(/maxParallel/)
     }
-  })
-
-  it('env 数字非法（NaN）→ 报错', () => {
-    const cwd = tempCwd()
-    writeConfig(cwd, {})
-    process.env.AFK_MAX_PARALLEL = 'abc'
-
-    expect(() => loadConfig(cwd)).toThrow(/maxParallel/)
   })
 
   it('非法 JSON → 报错（配置解析失败）', () => {
@@ -209,29 +203,6 @@ describe('loadConfig 加载与校验', () => {
     expect(cfg.conflictTries).toBe(5)
     expect(cfg.waitForChecks).toBe(false)
     expect(cfg.mergeTimeoutSec).toBe(120)
-
-    // env 覆盖：布尔 'true'/'false' 转类型，数字转 Number
-    process.env.AFK_AUTO_MERGE = 'true'
-    process.env.AFK_WAIT_FOR_CHECKS = 'false'
-    process.env.AFK_MAX_REVIEW_ROUNDS = '4'
-    process.env.AFK_MERGED_LABEL = 'merged'
-    process.env.AFK_CONFLICT_TRIES = '3'
-    process.env.AFK_MERGE_TIMEOUT_SEC = '900'
-    const overridden = loadConfig(cwd)
-    expect(overridden.autoMerge).toBe(true)
-    expect(overridden.waitForChecks).toBe(false)
-    expect(overridden.maxReviewRounds).toBe(4)
-    expect(overridden.mergedLabel).toBe('merged')
-    expect(overridden.conflictTries).toBe(3)
-    expect(overridden.mergeTimeoutSec).toBe(900)
-  })
-
-  it('布尔 env 非法值（非 true/false）→ 报错并定位键名', () => {
-    const cwd = tempCwd()
-    writeConfig(cwd, {})
-    process.env.AFK_AUTO_MERGE = 'yes'
-
-    expect(() => loadConfig(cwd)).toThrow(/autoMerge/)
   })
 
   it('完整流程新键非法值 → 报错并定位键名', () => {

@@ -7,13 +7,15 @@
 
 import type { Config } from './config.js'
 
+import { execa } from 'execa'
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import os from 'node:os'
 import { dirname, join } from 'node:path'
 import stripAnsi from 'strip-ansi'
 
-import { createGitIdentityResolver, type GitIdentity } from './identity.js'
+import { createGitIdentityResolver } from './identity.js'
+import { containerBaseArgs, filterSandboxEnv, sandboxHomeDir } from './sandbox.js'
 
 /** 事件对象：pi `--mode json` 事件流的一行（透传，只按需取字段） */
 export interface PiEvent {
@@ -261,7 +263,7 @@ export interface JsonlStageOptions {
   sessionDir: string
   /** spawn cwd（缺省继承进程 cwd） */
   cwd?: string
-  /** spawn env 注入（合并进 process.env，如 git 提交身份） */
+  /** spawn env：**完全指定**（不做 process.env 合并；谁想让进程看到什么，显式给） */
   env?: NodeJS.ProcessEnv
 }
 
@@ -290,7 +292,7 @@ export function runJsonlStage(
     const child = opts.spawnFn(opts.command, opts.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : undefined,
+      env: opts.env,
     })
 
     const finish = (exitCode: number, stderr: string): void => {
@@ -376,6 +378,119 @@ export interface HostExecutorOptions {
 }
 
 /**
+ * pi spawn 的 git 提交身份 env：作者/提交者一致，来自解析链（config.json > 宿主 global > 硬失败）。
+ * 宿主与沙箱共用：宿主端 pi 直接用；沙箱端经白名单注入容器（GIT_AUTHOR_* 在默认白名单内）。
+ */
+export function gitIdentityEnv(config: Config): NodeJS.ProcessEnv {
+  const { name, email } = createGitIdentityResolver(config)()
+  return {
+    GIT_AUTHOR_NAME: name,
+    GIT_AUTHOR_EMAIL: email,
+    GIT_COMMITTER_NAME: name,
+    GIT_COMMITTER_EMAIL: email,
+  }
+}
+
+/**
+ * 沙箱后端：每 stage 一个 `docker run --rm` 容器，容器内跑 `pi -p --mode json`。
+ * 共享核心 runJsonlStage 全复用：JSONL 分帧 / 解析 / 双超时 / 会话落盘 / 退出码归一。
+ * - 边界：worktree 挂载为 /workspace，agent 读写直通宿主；git/gh 操作由宿主侧完成
+ * - 隔离：--user 映射宿主 uid/gid；env 只透传白名单（model key/代理/PI_*，GH_TOKEN 排除）
+ * - HOME 指向匿名卷（afk-pi-home），容器内 pi settings 跨 stage 缓存、不落宿主
+ * - 超时：watchdog kill docker run 前台进程；未及时退出则 docker kill 兜底
+ */
+export interface SandboxExecutorOptions {
+  spawnFn?: SpawnFn
+  idleMs?: number
+  completionMs?: number
+  sessionDir?: string
+  /** worktree 宿主绝对路径（挂载为容器 /workspace） */
+  worktree: string
+  /** 已由 afk init 构建、run 启动时校验过的镜像 tag */
+  imageTag: string
+  /** 沙箱 HOME 宿主目录（缺省 <cwd>/.pi/afk/pi-home，宿主创建保证 --user 可写） */
+  homeDir?: string
+}
+
+export class SandboxExecutor {
+  private readonly config: Config
+  private readonly spawnFn: SpawnFn
+  private readonly idleMs: number
+  private readonly completionMs: number
+  private readonly sessionDir: string
+  private readonly worktree: string
+  private readonly imageTag: string
+  private readonly homeDir: string
+
+  constructor(config: Config, opts: SandboxExecutorOptions) {
+    this.config = config
+    this.spawnFn = opts.spawnFn ?? spawn
+    this.idleMs = opts.idleMs ?? config.idleTimeoutSec * 1000
+    this.completionMs = opts.completionMs ?? config.completionTimeoutSec * 1000
+    this.sessionDir = opts.sessionDir ?? config.sessionsDir
+    this.worktree = opts.worktree
+    this.imageTag = opts.imageTag
+    // 宿主 HOME 目录：宿主侧创建（owner = 当前用户）→ 容器 --user 进程可写，避免命名卷 root 属主权限坑
+    this.homeDir = opts.homeDir ?? sandboxHomeDir()
+    mkdirSync(this.homeDir, { recursive: true })
+  }
+
+  runStage(ctx: StageContext, hooks?: ExecutorHooks): Promise<StageResult> {
+    const containerName = `afk-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+    const settled = runJsonlStage(ctx, hooks, {
+      command: 'docker',
+      args: this.containerArgs(ctx, containerName),
+      spawnFn: this.spawnFn,
+      idleMs: this.idleMs,
+      completionMs: this.completionMs,
+      sessionDir: this.sessionDir,
+      cwd: this.worktree,
+      env: this.containerEnv(),
+    })
+    // 超时兜底：docker run 前台收到 SIGTERM 会停容器；若进程未及时退，显式 docker kill
+    return settled.then((result) => {
+      if (result.timedOut) {
+        void execa('docker', ['kill', containerName], { reject: false }).catch(() => undefined)
+      }
+      return result
+    })
+  }
+
+  private containerArgs(ctx: StageContext, containerName: string): string[] {
+    const args = containerBaseArgs({
+      worktree: this.worktree,
+      homeDir: this.homeDir,
+      memory: this.config.sandboxMemory,
+      cpus: this.config.sandboxCpus,
+    })
+    args.push(
+      '--name',
+      containerName,
+      this.imageTag,
+      // 镜像 ENTRYPOINT 是 pi，docker run 命令覆盖为显式 pi（参数与宿主后端一致）
+      'pi',
+      '-p',
+      '--mode',
+      'json',
+      '--model',
+      ctx.model,
+      '--thinking',
+      this.config.thinking,
+      ctx.prompt,
+    )
+    return args
+  }
+
+  /** 容器 env：白名单过滤宿主 env + git 身份注入（GH_TOKEN 等凭据天然排除） */
+  private containerEnv(): NodeJS.ProcessEnv {
+    return {
+      ...filterSandboxEnv(process.env, this.config.sandboxEnv),
+      ...gitIdentityEnv(this.config),
+    }
+  }
+}
+
+/**
  * 宿主后端：spawn `pi -p --mode json`，流式消费事件。
  * 委托共享核心 runJsonlStage（分帧 / 解析 / 双超时 / 落盘 / 退出码归一全在共享层）。
  */
@@ -385,7 +500,6 @@ export class HostExecutor {
   private readonly idleMs: number
   private readonly completionMs: number
   private readonly sessionDir: string
-  private readonly resolveIdentity: () => GitIdentity
 
   constructor(config: Config, opts: HostExecutorOptions = {}) {
     this.config = config
@@ -393,7 +507,6 @@ export class HostExecutor {
     this.idleMs = opts.idleMs ?? config.idleTimeoutSec * 1000
     this.completionMs = opts.completionMs ?? config.completionTimeoutSec * 1000
     this.sessionDir = opts.sessionDir ?? config.sessionsDir
-    this.resolveIdentity = createGitIdentityResolver(config)
   }
 
   runStage(ctx: StageContext, hooks?: ExecutorHooks): Promise<StageResult> {
@@ -414,18 +527,8 @@ export class HostExecutor {
       completionMs: this.completionMs,
       sessionDir: this.sessionDir,
       cwd: ctx.cwd,
-      env: this.gitIdentityEnv(),
+      // 宿主端：完整 env（pi 需要 PATH/HOME/模型 key 等）+ 注入 git 提交身份
+      env: { ...process.env, ...gitIdentityEnv(this.config) },
     })
-  }
-
-  /** pi spawn 的 git 提交身份 env：作者/提交者一致，来自解析链（env > config.json > 宿主 global > 硬失败） */
-  private gitIdentityEnv(): NodeJS.ProcessEnv {
-    const { name, email } = this.resolveIdentity()
-    return {
-      GIT_AUTHOR_NAME: name,
-      GIT_AUTHOR_EMAIL: email,
-      GIT_COMMITTER_NAME: name,
-      GIT_COMMITTER_EMAIL: email,
-    }
   }
 }

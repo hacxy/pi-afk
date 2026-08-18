@@ -4,7 +4,7 @@ import type { Issue } from './issues.js'
 import { isAbsolute, relative } from 'node:path'
 import pMap from 'p-map'
 
-import { HostExecutor, type StageResult } from './executor.js'
+import { HostExecutor, SandboxExecutor, type StageResult } from './executor.js'
 import {
   archiveWorktree,
   branchName,
@@ -33,6 +33,7 @@ import {
 import { beginIssueLog, log, logError, type IssueLogger } from './log.js'
 import { implementerFixPrompt, implementerPrompt, mergerPrompt, reviewerPrompt } from './prompts.js'
 import { compareUrl, failureComment, successComment } from './report.js'
+import { requireSandboxImage } from './sandbox.js'
 
 export interface IssueResult {
   issue: Issue
@@ -92,6 +93,13 @@ class MergeQueue {
  * 防同批重选死循环。
  */
 export async function runAfk(config: Config, maxIterations = 1): Promise<IssueResult[]> {
+  // 沙箱启动校验（默认模式）：镜像必须已由 afk init 构建且 tag 匹配当前 Dockerfile。
+  // 缺失 / Dockerfile 改动 / docker 不可用 → 干净报错，绝不自动 build、绝不静默降级宿主
+  let sandboxImage: string | undefined
+  if (config.sandbox) {
+    sandboxImage = await requireSandboxImage(process.cwd())
+  }
+
   // 幂等补建状态机 label（进程级一次）：todo 建不上 → 硬失败（否则静默空跑浪费迭代）；
   // 其余建不上 → 警告继续（附属状态标记，不阻塞主流程）
   const ensure = await ensureLabels(config)
@@ -150,7 +158,7 @@ export async function runAfk(config: Config, maxIterations = 1): Promise<IssueRe
       batch,
       async (issue): Promise<IssueResult> => {
         try {
-          return await processIssue(config, issue, baseSha, mergeQueue)
+          return await processIssue(config, issue, baseSha, mergeQueue, sandboxImage)
         } catch (error) {
           logError(`#${issue.number} 处理异常：${error instanceof Error ? error.message : error}`)
           return { issue, status: 'failed', error: String(error) }
@@ -168,6 +176,7 @@ async function processIssue(
   issue: Issue,
   baseSha: string,
   mergeQueue: MergeQueue,
+  sandboxImage: string | undefined,
 ): Promise<IssueResult> {
   const logger = beginIssueLog(issue.number, config.logsDir)
   const branch = branchName(config, issue)
@@ -178,13 +187,13 @@ async function processIssue(
     logger.log(`开始（${branch}）`)
     worktree = await createWorktree(config, branch, baseSha)
 
-    // 宿主侧装依赖（编排层负责，agent 不自装）
+    // 依赖安装（编排层负责，agent 不自装）：沙箱模式容器内执行，--local 宿主执行
     currentStage = 'install'
-    await installDeps(worktree, config, logger.log)
+    await installDeps(worktree, config, logger.log, { imageTag: sandboxImage })
 
     // 单阶段 implementer：写代码 + 验证 + 提交
     currentStage = 'implementer'
-    await implementerPhase(config, worktree, branch, issue, logger)
+    await implementerPhase(config, worktree, branch, issue, logger, sandboxImage)
 
     // 宿主 push 分支（重跑场景远端有残留 → force-with-lease 覆盖，Q7）
     currentStage = 'push'
@@ -204,7 +213,15 @@ async function processIssue(
 
     // codereview：同一 worktree、新会话，review 循环（≤ maxReviewRounds 轮）
     currentStage = 'review'
-    const reviewRounds = await reviewLoop(config, worktree, branch, pr.number, issue, logger)
+    const reviewRounds = await reviewLoop(
+      config,
+      worktree,
+      branch,
+      pr.number,
+      issue,
+      logger,
+      sandboxImage,
+    )
     logger.log(`review ${reviewRounds} 轮通过`)
 
     // 合并 PR（autoMerge opt-in；宿主串行队列内 fetch 最新 base + 化解冲突）
@@ -213,7 +230,9 @@ async function processIssue(
       currentStage = 'merge'
       // 闭包内 worktree 被悲观收窄为 string | undefined，先拷贝为确定值
       const wt = worktree
-      await mergeQueue.run(() => mergePhase(config, wt, branch, pr.number, issue, logger))
+      await mergeQueue.run(() =>
+        mergePhase(config, wt, branch, pr.number, issue, logger, sandboxImage),
+      )
       merged = true
       logger.log(`已合并 → ${pr.url}`)
       await tryReport(logger, () => addLabel(issue.number, config.mergedLabel), `加 merged label`)
@@ -328,9 +347,9 @@ function failureInfo(
 }
 
 /**
- * 通用 agent 阶段（implementer/reviewer/fixer/merger 共用）：宿主 spawn pi，
- * agent 正文增量落盘 issue 日志（不进终端）。关键信息：开场 log 路径（可 tail）、
- * 心跳、阶段结束 + 退出码 + 耗时 + 输出量 + 超时 + session id；
+ * 通用 agent 阶段（implementer/reviewer/fixer/merger 共用）：沙箱模式容器内跑 pi，
+ * --local 宿主跑 pi。agent 正文增量落盘 issue 日志（不进终端）。关键信息：开场
+ * log 路径（可 tail）、心跳、阶段结束 + 退出码 + 耗时 + 输出量 + 超时 + session id；
  * agent 完整事件流留在 session 文件（stage 带轮次后缀避免覆盖）。
  */
 async function runAgentPhase(
@@ -339,7 +358,7 @@ async function runAgentPhase(
   branch: string,
   issue: Issue,
   logger: IssueLogger,
-  opts: { stage: string; prompt: string; model: string; label: string },
+  opts: { stage: string; prompt: string; model: string; label: string; sandboxImage?: string },
 ): Promise<StageResult> {
   logger.log(`${opts.label}（${opts.model}）… log: ${reportPath(logger.file)}`)
   const startedAt = Date.now()
@@ -349,7 +368,10 @@ async function runAgentPhase(
   }, HEARTBEAT_MS)
   let result: StageResult
   try {
-    result = await new HostExecutor(config).runStage(
+    const executor = config.sandbox
+      ? new SandboxExecutor(config, { worktree, imageTag: opts.sandboxImage ?? '' })
+      : new HostExecutor(config)
+    result = await executor.runStage(
       {
         prompt: opts.prompt,
         model: opts.model,
@@ -380,12 +402,14 @@ async function implementerPhase(
   branch: string,
   issue: Issue,
   logger: IssueLogger,
+  sandboxImage: string | undefined,
 ): Promise<void> {
   const result = await runAgentPhase(config, worktree, branch, issue, logger, {
     stage: 'implementer',
     prompt: implementerPrompt(issue, branch),
     model: config.model,
     label: 'implementer 阶段',
+    sandboxImage,
   })
   if (result.exitCode !== 0) {
     throw new StageFailure(
@@ -412,6 +436,7 @@ async function reviewLoop(
   prNumber: number,
   issue: Issue,
   logger: IssueLogger,
+  sandboxImage: string | undefined,
 ): Promise<number> {
   const model = config.reviewerModel || config.model
   for (let round = 1; round <= config.maxReviewRounds; round++) {
@@ -420,6 +445,7 @@ async function reviewLoop(
       prompt: reviewerPrompt(issue, branch, config.baseBranch),
       model,
       label: `reviewer 阶段 第${round}轮`,
+      sandboxImage,
     })
     if (review.exitCode !== 0) {
       throw new StageFailure(
@@ -447,6 +473,7 @@ async function reviewLoop(
       prompt: implementerFixPrompt(issue, branch, feedback),
       model: config.model,
       label: `fixer 阶段 第${round}轮`,
+      sandboxImage,
     })
     if (fix.exitCode !== 0) {
       throw new StageFailure('fixer', fix.exitCode, fix.stderr, fix.sessionFile, fix.timedOut)
@@ -487,6 +514,7 @@ async function mergePhase(
   prNumber: number,
   issue: Issue,
   logger: IssueLogger,
+  sandboxImage: string | undefined,
 ): Promise<void> {
   await fetchBase(config) // 串行段：合并前拿最新 base（worktree 共享宿主 refs）
   for (let attempt = 1; attempt <= config.conflictTries; attempt++) {
@@ -502,6 +530,7 @@ async function mergePhase(
         prompt: mergerPrompt(issue, branch, config.baseBranch, files),
         model: config.model,
         label: `merger 阶段 第${attempt}次`,
+        sandboxImage,
       })
       if (merge.exitCode !== 0) {
         throw new StageFailure(

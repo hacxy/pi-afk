@@ -11,15 +11,13 @@ function globalConfig(key: 'user.name' | 'user.email'): string | undefined {
 }
 
 /**
- * git 提交身份解析链（env 最高优先级，docker/CI 注入通道永不失效）：
- * ① 环境变量 AFK_GIT_AUTHOR/AFK_GIT_EMAIL（成对提供）
- * ② config.json 的 gitAuthor/gitEmail（opt-in，成对提供；init 模板不含）
- * ③ 宿主 `git config --global user.name/user.email`（惰性 memoize，首访 spawn 一次）
- * ④ 全部缺失 → 硬失败。
+ * git 提交身份解析链（配置只读 config.json；环境变量仅保留模型 API key / GH_TOKEN）：
+ * ① config.json 的 gitAuthor/gitEmail（opt-in，成对提供；init 模板不含）
+ * ② 宿主 `git config --global user.name/user.email`（惰性 memoize，首访 spawn 一次）
+ * ③ 全部缺失 → 硬失败。
  *
- * docker 启动方约定：循环在容器里跑时容器内没有宿主 gitconfig，
- * 宿主侧（docker run 启动方）先解析 `git config --global user.name/email`，
- * 再以 `-e AFK_GIT_AUTHOR=... -e AFK_GIT_EMAIL=...` 传入（唯一最高优先级通道）。
+ * 沙箱模式：宿主侧解析出身份后，作为 GIT_AUTHOR_* / GIT_COMMITTER_* 注入容器 env
+ * （该四件套在默认沙箱白名单内），容器内 pi 的 git commit 直接使用。
  */
 export interface GitIdentity {
   name: string
@@ -34,36 +32,23 @@ export function createGitIdentityResolver(
   return () => {
     if (cached) return cached
 
-    // ① env：docker/CI 注入通道，永远可覆盖下方所有来源
-    const envName = process.env.AFK_GIT_AUTHOR?.trim()
-    const envEmail = process.env.AFK_GIT_EMAIL?.trim()
-    if (envName || envEmail) {
-      if (!envName || !envEmail) {
-        throw new Error('AFK_GIT_AUTHOR 与 AFK_GIT_EMAIL 必须同时设置（成对提供）')
-      }
-      cached = { name: envName, email: envEmail }
-      return cached
-    }
-
-    // ② config.json：opt-in 默认身份（成对）
+    // ① config.json：opt-in 默认身份（成对）
     const cfgName = config.gitAuthor?.trim()
     const cfgEmail = config.gitEmail?.trim()
     if (cfgName || cfgEmail) {
       if (!cfgName || !cfgEmail) {
-        throw new Error(
-          'config.json 中 gitAuthor/gitEmail 必须成对提供（或改用环境变量 AFK_GIT_AUTHOR/AFK_GIT_EMAIL）',
-        )
+        throw new Error('config.json 中 gitAuthor/gitEmail 必须成对提供')
       }
       cached = { name: cfgName, email: cfgEmail }
       return cached
     }
 
-    // ③ 宿主 global gitconfig
+    // ② 宿主 global gitconfig
     const globalName = globalConfig('user.name')
     const globalEmail = globalConfig('user.email')
     if (!globalName || !globalEmail) {
       throw new Error(
-        '无法确定 git 提交身份：请用任一方式设置——① git config --global user.name/user.email；② 环境变量 AFK_GIT_AUTHOR/AFK_GIT_EMAIL（docker 模式由宿主侧注入）；③ config.json 的 gitAuthor/gitEmail',
+        '无法确定 git 提交身份：请用任一方式设置——① config.json 的 gitAuthor/gitEmail；② git config --global user.name/user.email',
       )
     }
     cached = { name: globalName, email: globalEmail }

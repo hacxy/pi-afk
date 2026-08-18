@@ -9,6 +9,7 @@ import { DEFAULT_CONFIG } from '../src/config.js'
 import {
   HostExecutor,
   JsonlSplitter,
+  SandboxExecutor,
   SessionRecorder,
   Watchdog,
   type StageContext,
@@ -20,8 +21,15 @@ import {
   parseSessionHead,
 } from '../src/executor.js'
 
-/** 测试配置：内置默认（thinking/sessionsDir/超时由 opts 覆盖） */
-const cfg = { ...DEFAULT_CONFIG }
+vi.mock('execa', () => ({ execa: vi.fn() }))
+import { execa } from 'execa'
+
+/** 测试配置：内置默认 + config 注入 git 身份（确定性，不碰宿主 gitconfig） */
+const cfg = {
+  ...DEFAULT_CONFIG,
+  gitAuthor: 'afk-test',
+  gitEmail: 'afk-test@example.com',
+}
 
 type FakeChild = EventEmitter & {
   stdout: PassThrough
@@ -266,16 +274,6 @@ describe('SessionRecorder 会话落盘', () => {
 })
 
 describe('HostExecutor 宿主后端（假 spawn）', () => {
-  // git 身份解析走真实单例：设 env 保持确定性（不 spawn git），用后恢复
-  beforeEach(() => {
-    process.env.AFK_GIT_AUTHOR = 'afk-test'
-    process.env.AFK_GIT_EMAIL = 'afk-test@example.com'
-  })
-  afterEach(() => {
-    delete process.env.AFK_GIT_AUTHOR
-    delete process.env.AFK_GIT_EMAIL
-  })
-
   function makeExecutor(overrides: { idleMs?: number; completionMs?: number } = {}) {
     const child = makeFakeChild()
     const sessionDir = mkdtempSync(join(tmpdir(), 'afk-host-'))
@@ -399,7 +397,7 @@ describe('HostExecutor 宿主后端（假 spawn）', () => {
     expect(result.stderr).toBe('真实错误\n')
   })
 
-  it('注入 git 提交身份 env：作者/提交者 = 解析身份（AFK_GIT_*）', async () => {
+  it('注入 git 提交身份 env：作者/提交者 = config 注入的解析身份', async () => {
     const child = makeFakeChild()
     let spawnEnv: NodeJS.ProcessEnv | undefined
     const executor = new HostExecutor(cfg, {
@@ -424,6 +422,173 @@ describe('HostExecutor 宿主后端（假 spawn）', () => {
       GIT_COMMITTER_NAME: 'afk-test',
       GIT_COMMITTER_EMAIL: 'afk-test@example.com',
     })
+  })
+})
+
+describe('SandboxExecutor 沙箱后端（假 spawn）', () => {
+  /** 工作树宿主路径：挂载为容器 /workspace */
+  const worktree = '/tmp/fake-worktree'
+  const imageTag = 'afk-sandbox-abcdef0123456789'
+  const sandboxCfg = { ...cfg }
+
+  function makeExecutor(overrides: { idleMs?: number; completionMs?: number } = {}) {
+    const child = makeFakeChild()
+    const sessionDir = mkdtempSync(join(tmpdir(), 'afk-sandbox-'))
+    let spawnArgs:
+      { cmd: string; args: string[]; opts: { cwd?: string; env?: NodeJS.ProcessEnv } } | undefined
+    const executor = new SandboxExecutor(sandboxCfg, {
+      spawnFn: (cmd, args, opts) => {
+        spawnArgs = { cmd, args, opts }
+        return child
+      },
+      idleMs: overrides.idleMs ?? 1000,
+      completionMs: overrides.completionMs ?? 500,
+      sessionDir,
+      worktree,
+      imageTag,
+      homeDir: '/tmp/fake-pi-home',
+    })
+    return { executor, child, sessionDir, spawn: () => spawnArgs }
+  }
+
+  /** 从 spawn args 提取 --name 后的容器名 */
+  function containerName(args: string[]): string {
+    const i = args.indexOf('--name')
+    return args[i + 1] ?? ''
+  }
+
+  it('构造 docker run 命令：--rm/--user/-e HOME/-v 挂载/--name/镜像/pi 参数', async () => {
+    const was = process.env.DEEPSEEK_API_KEY
+    process.env.DEEPSEEK_API_KEY = 'sk-1'
+    try {
+      const { executor, child, spawn } = makeExecutor()
+      const promise = executor.runStage(ctx)
+      child.stdout.write('{"type":"session","id":"s1"}\n')
+      child.stdout.end()
+      child.exit(0, null)
+      await promise
+
+      const s = spawn()!
+      expect(s.cmd).toBe('docker')
+      const args = s.args
+      expect(args[0]).toBe('run')
+      expect(args).toContain('--rm')
+      const uid = process.getuid?.()
+      if (uid !== undefined) {
+        expect(args).toContain('--user')
+        expect(args[args.indexOf('--user') + 1]).toBe(`${uid}:${process.getgid?.() ?? uid}`)
+      }
+      expect(args).toContain('HOME=/tmp/pi-home')
+      expect(args).toContain('/tmp/fake-pi-home:/tmp/pi-home') // 宿主 HOME 目录（--user 可写）
+      expect(args).toContain(`${worktree}:/workspace`) // 宿主 worktree 直通
+      expect(args[args.indexOf('--name') + 1]).toMatch(/^afk-\d+-[a-z0-9]+$/)
+      expect(args[args.indexOf('--name') + 2]).toBe(imageTag)
+      // pi 命令与参数（镜像 ENTRYPOINT 被 docker run 命令覆盖为显式 pi）
+      const piIdx = args.indexOf('pi')
+      expect(args.slice(piIdx)).toEqual([
+        'pi',
+        '-p',
+        '--mode',
+        'json',
+        '--model',
+        'm',
+        '--thinking',
+        'medium',
+        '测试',
+      ])
+      // spawn cwd 指向 worktree（宿主侧）
+      expect(s.opts.cwd).toBe(worktree)
+    } finally {
+      if (was === undefined) delete process.env.DEEPSEEK_API_KEY
+      else process.env.DEEPSEEK_API_KEY = was
+    }
+  })
+
+  it('env 进容器：白名单透传 + git 身份注入，HOME 强制指向匿名卷', async () => {
+    const was = process.env.DEEPSEEK_API_KEY
+    const wasGht = process.env.GH_TOKEN
+    process.env.DEEPSEEK_API_KEY = 'sk-1'
+    process.env.GH_TOKEN = 'ghp-secret'
+    try {
+      const { executor, child, spawn } = makeExecutor()
+      const promise = executor.runStage(ctx)
+      child.stdout.write('{"type":"session","id":"s2"}\n')
+      child.stdout.end()
+      child.exit(0, null)
+      await promise
+
+      const env = spawn()!.opts.env!
+      expect(env.DEEPSEEK_API_KEY).toBe('sk-1') // 白名单命中
+      expect(env.GH_TOKEN).toBeUndefined() // 白名单排除
+      expect(env.GIT_AUTHOR_NAME).toBe('afk-test') // config 身份注入
+      expect(env.GIT_AUTHOR_EMAIL).toBe('afk-test@example.com')
+      expect(env.GIT_COMMITTER_NAME).toBe('afk-test')
+      expect(env.GIT_COMMITTER_EMAIL).toBe('afk-test@example.com')
+    } finally {
+      if (was === undefined) delete process.env.DEEPSEEK_API_KEY
+      else process.env.DEEPSEEK_API_KEY = was
+      if (wasGht === undefined) delete process.env.GH_TOKEN
+      else process.env.GH_TOKEN = wasGht
+    }
+  })
+
+  it('资源限制：config.sandboxMemory/sandboxCpus → --memory/--cpus', async () => {
+    const { executor, child, spawn } = makeExecutor()
+    ;(executor as unknown as { config: typeof sandboxCfg }).config = {
+      ...sandboxCfg,
+      sandboxMemory: '4g',
+      sandboxCpus: 2,
+    }
+    const promise = executor.runStage(ctx)
+    child.stdout.write('{"type":"session","id":"s3"}\n')
+    child.stdout.end()
+    child.exit(0, null)
+    await promise
+
+    const args = spawn()!.args
+    expect(args).toContain('--memory')
+    expect(args[args.indexOf('--memory') + 1]).toBe('4g')
+    expect(args).toContain('--cpus')
+    expect(args[args.indexOf('--cpus') + 1]).toBe('2')
+  })
+
+  it('端到端：复用 runJsonlStage 事件流 → 退出码/sessionId/text 还原', async () => {
+    const { executor, child, spawn } = makeExecutor()
+    const promise = executor.runStage(ctx)
+    child.stdout.write('{"type":"session","id":"s4"}\n')
+    child.stdout.write(
+      '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"沙箱"}}\n',
+    )
+    child.stdout.write('{"type":"agent_settled"}\n')
+    child.stdout.end()
+    child.exit(0, null)
+
+    const result = await promise
+    expect(result.exitCode).toBe(0)
+    expect(result.sessionId).toBe('s4')
+    expect(result.stdout).toBe('沙箱')
+    expect(result.timedOut).toBe(false)
+    expect(spawn()!.args[0]).toBe('run')
+  })
+
+  it('idle 超时：kill 容器兜底（docker kill <容器名>）+ timedOut 标记', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(execa).mockResolvedValue({ exitCode: 0 } as never)
+      const { executor, child, spawn } = makeExecutor({ idleMs: 100, completionMs: 50 })
+      const promise = executor.runStage(ctx)
+      child.stdout.write('{"type":"session","id":"s5"}\n')
+
+      await vi.advanceTimersByTimeAsync(100)
+
+      const result = await promise
+      expect(result.timedOut).toBe(true)
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+      const name = containerName(spawn()!.args)
+      expect(execa).toHaveBeenCalledWith('docker', ['kill', name], expect.anything())
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

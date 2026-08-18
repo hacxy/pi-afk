@@ -6,7 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { runAfk } from '../src/loop.js'
 
 vi.mock('../src/install.js', () => ({ installDeps: vi.fn() }))
-vi.mock('../src/executor.js', () => ({ HostExecutor: vi.fn() }))
+vi.mock('../src/executor.js', () => ({ HostExecutor: vi.fn(), SandboxExecutor: vi.fn() }))
+vi.mock('../src/sandbox.js', () => ({ requireSandboxImage: vi.fn() }))
 vi.mock('../src/git.js', () => ({
   archiveWorktree: vi.fn(),
   branchName: vi.fn(),
@@ -34,7 +35,7 @@ vi.mock('../src/issues.js', () => ({
 vi.mock('../src/log.js', () => ({ beginIssueLog: vi.fn(), log: vi.fn(), logError: vi.fn() }))
 
 import { DEFAULT_CONFIG, type Config } from '../src/config.js'
-import { HostExecutor } from '../src/executor.js'
+import { HostExecutor, SandboxExecutor } from '../src/executor.js'
 import {
   archiveWorktree,
   branchName,
@@ -61,6 +62,7 @@ import {
   waitForChecksPass,
 } from '../src/issues.js'
 import { beginIssueLog, log, logError } from '../src/log.js'
+import { requireSandboxImage } from '../src/sandbox.js'
 
 const issue: Issue = {
   number: 52,
@@ -69,8 +71,10 @@ const issue: Issue = {
   labels: ['agent:todo'],
 }
 
-/** 测试配置：内置默认（labels/baseBranch/maxParallel=2 等） */
-const cfg: Config = { ...DEFAULT_CONFIG }
+/** 宿主后端测试配置：显式关沙箱（沙箱接线在下方专门 describe） */
+const cfg: Config = { ...DEFAULT_CONFIG, sandbox: false }
+/** 沙箱后端测试配置：默认开启 */
+const sandboxCfg: Config = { ...DEFAULT_CONFIG, baseBranch: 'main' }
 
 const BASE_SHA = '1db529b480283a4d1c8d1bc9422962fbe950492e'
 
@@ -101,6 +105,8 @@ interface FakeExecutor {
 let executors: FakeExecutor[] = []
 /** 各阶段结果队列：每次 runStage shift 一个，耗尽回退 okResult() */
 let stageQueue: Array<Parameters<typeof okResult>[0]> = []
+/** SandboxExecutor 最近一次构造参数（worktree/imageTag 断言用） */
+let lastSandboxOpts: { worktree?: string; imageTag?: string } = {}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -126,6 +132,18 @@ beforeEach(() => {
   })
   vi.mocked(installDeps).mockResolvedValue(undefined)
   vi.mocked(hasRemoteBranch).mockResolvedValue(false)
+  vi.mocked(requireSandboxImage).mockResolvedValue('afk-sandbox-1234')
+  vi.mocked(SandboxExecutor).mockImplementation(((config, opts) => {
+    lastSandboxOpts = (opts ?? {}) as { worktree?: string; imageTag?: string }
+    const executor: FakeExecutor = {
+      runStage: vi.fn().mockImplementation(() => {
+        const next = stageQueue.shift()
+        return Promise.resolve(okResult(next))
+      }),
+    }
+    executors.push(executor)
+    return executor as unknown as InstanceType<typeof SandboxExecutor>
+  }) as unknown as typeof SandboxExecutor)
   vi.mocked(mergeBaseIntoBranch).mockResolvedValue(true)
   vi.mocked(conflictedFiles).mockResolvedValue([])
   vi.mocked(mergePr).mockResolvedValue(undefined)
@@ -165,7 +183,9 @@ describe('runAfk 完整 pipeline（宿主后端，autoMerge=false 默认）', ()
 
     // 宿主侧装依赖，在 worktree 里执行
     expect(installDeps).toHaveBeenCalledTimes(1)
-    expect(installDeps).toHaveBeenCalledWith('/tmp/wt', cfg, expect.any(Function))
+    expect(installDeps).toHaveBeenCalledWith('/tmp/wt', cfg, expect.any(Function), {
+      imageTag: undefined, // 宿主模式不传镜像 tag
+    })
 
     // 两阶段：implementer（新会话）+ reviewer-1（新会话，同一 worktree）
     const calls = stageCalls()
@@ -543,5 +563,45 @@ describe('runAfk 迭代语义', () => {
     expect(createWorktree).not.toHaveBeenCalled()
     expect(executors).toHaveLength(0)
     expect(openPr).not.toHaveBeenCalled()
+  })
+})
+
+describe('runAfk 沙箱接线（sandbox=true 默认模式）', () => {
+  it('启动先 requireSandboxImage 校验镜像，阶段跑在 SandboxExecutor（worktree+imageTag），install 容器内执行', async () => {
+    const results = await runAfk(sandboxCfg)
+
+    expect(requireSandboxImage).toHaveBeenCalledWith(process.cwd())
+    expect(results[0].status).toBe('done')
+    expect(executors.length).toBeGreaterThan(0) // 阶段真实跑了
+    expect(HostExecutor).not.toHaveBeenCalled() // 默认模式不用宿主后端
+    expect(lastSandboxOpts).toMatchObject({ worktree: '/tmp/wt', imageTag: 'afk-sandbox-1234' })
+    // 依赖安装在容器内执行（imageTag 下行到 installDeps）
+    expect(installDeps).toHaveBeenCalledWith('/tmp/wt', sandboxCfg, expect.anything(), {
+      imageTag: 'afk-sandbox-1234',
+    })
+  })
+
+  it('requireSandboxImage 失败（未构建镜像 / docker 不可用）→ runAfk 直接抛错：不拉 issue、不建 worktree、不跑任何阶段', async () => {
+    vi.mocked(requireSandboxImage).mockRejectedValue(
+      new Error('沙箱镜像未构建（afk-sandbox-xxx）：请执行 afk init 构建'),
+    )
+
+    await expect(runAfk(sandboxCfg)).rejects.toThrow(/afk init/)
+
+    expect(listTodoIssues).not.toHaveBeenCalled()
+    expect(beginIssueLog).not.toHaveBeenCalled()
+    expect(createWorktree).not.toHaveBeenCalled()
+  })
+
+  it('sandbox=false（--local 的持久化形态）→ 不校验镜像、跑 HostExecutor、install 不带 imageTag', async () => {
+    const results = await runAfk(cfg)
+
+    expect(requireSandboxImage).not.toHaveBeenCalled()
+    expect(SandboxExecutor).not.toHaveBeenCalled()
+    expect(HostExecutor).toHaveBeenCalled()
+    expect(installDeps).toHaveBeenCalledWith('/tmp/wt', cfg, expect.anything(), {
+      imageTag: undefined,
+    })
+    expect(results[0].status).toBe('done')
   })
 })

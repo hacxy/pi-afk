@@ -8,9 +8,51 @@ export const CONFIG_FILE = '.pi/afk/config.json'
 /** 合法 thinking 等级（pi --thinking 取值） */
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
-/** 内置默认值（init 模板与 loadConfig 共用；不含可选键） */
-export const DEFAULT_CONFIG = {
+/**
+ * 默认沙箱 env 白名单：透传进容器的宿主环境变量（按名精确匹配，`*` 后缀通配）。
+ * 只放行运行 pi 所需：模型 API key（显式列举，不让无关 secret 借通配进容器）、
+ * 网络代理、pi 自身设置、git 提交身份注入、CI。GH_TOKEN 等 GitHub 凭据明确不在列
+ * （gh 在宿主侧跑，容器内不需要）。
+ */
+export const DEFAULT_SANDBOX_ENV: readonly string[] = [
+  // 模型 API key
+  'DEEPSEEK_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'GEMINI_API_KEY',
+  'GROQ_API_KEY',
+  'XAI_API_KEY',
+  'MISTRAL_API_KEY',
+  'TOGETHER_API_KEY',
+  // 网络代理
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy',
+  // pi 自身设置
+  'PI_*',
+  // git 提交身份（宿主解析后注入，容器内 commit 用）
+  'GIT_AUTHOR_NAME',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_COMMITTER_NAME',
+  'GIT_COMMITTER_EMAIL',
+  // 非交互安装
+  'CI',
+]
+
+/** 内置默认值（init 模板与 loadConfig 共用；不含可选键/可选 identity） */
+export const DEFAULT_CONFIG: Omit<
+  Config,
+  'gitAuthor' | 'gitEmail' | 'installCmd' | 'reviewerModel' | 'sandboxMemory' | 'sandboxCpus'
+> = {
   model: 'deepseek/deepseek-v4-flash',
+  sandbox: true,
+  sandboxEnv: [...DEFAULT_SANDBOX_ENV],
   thinking: 'medium',
   maxParallel: 2,
   todoLabel: 'agent:todo',
@@ -36,6 +78,14 @@ export const DEFAULT_CONFIG = {
 /** 项目配置（含可选 git 提交身份键，opt-in 成对） */
 export interface Config {
   model: string
+  /** 默认沙箱 docker 容器运行；false = 宿主本地运行（--local） */
+  sandbox: boolean
+  /** 沙箱 env 白名单：透传进容器的宿主环境变量（可含 `*` 后缀通配） */
+  sandboxEnv: string[]
+  /** 容器内存上限（docker --memory，如 '4g'），缺省不限 */
+  sandboxMemory?: string
+  /** 容器 CPU 上限（docker --cpus），缺省不限 */
+  sandboxCpus?: number
   thinking: (typeof THINKING_LEVELS)[number]
   maxParallel: number
   todoLabel: string
@@ -68,39 +118,6 @@ export interface Config {
   mergeTimeoutSec: number
 }
 
-/** 环境变量覆盖映射：AFK_* → 配置键 → 类型化（数字走 Number，坏值由 schema 拦截） */
-const ENV_MAP: ReadonlyArray<readonly [string, keyof Config, (v: string) => unknown]> = [
-  ['AFK_MODEL', 'model', (v) => v],
-  ['AFK_THINKING', 'thinking', (v) => v],
-  ['AFK_MAX_PARALLEL', 'maxParallel', Number],
-  ['AFK_TODO_LABEL', 'todoLabel', (v) => v],
-  ['AFK_DONE_LABEL', 'doneLabel', (v) => v],
-  ['AFK_FAILED_LABEL', 'failedLabel', (v) => v],
-  ['AFK_BRANCH_PREFIX', 'branchPrefix', (v) => v],
-  ['AFK_BASE_BRANCH', 'baseBranch', (v) => v],
-  ['AFK_WORKTREES_DIR', 'worktreesDir', (v) => v],
-  ['AFK_FAILED_DIR', 'failedDir', (v) => v],
-  ['AFK_LOGS_DIR', 'logsDir', (v) => v],
-  ['AFK_SESSIONS_DIR', 'sessionsDir', (v) => v],
-  ['AFK_INSTALL_CMD', 'installCmd', (v) => v],
-  ['AFK_IDLE_TIMEOUT_SEC', 'idleTimeoutSec', Number],
-  ['AFK_COMPLETION_TIMEOUT_SEC', 'completionTimeoutSec', Number],
-  ['AFK_AUTO_MERGE', 'autoMerge', parseBool],
-  ['AFK_MERGED_LABEL', 'mergedLabel', (v) => v],
-  ['AFK_REVIEWER_MODEL', 'reviewerModel', (v) => v],
-  ['AFK_MAX_REVIEW_ROUNDS', 'maxReviewRounds', Number],
-  ['AFK_CONFLICT_TRIES', 'conflictTries', Number],
-  ['AFK_WAIT_FOR_CHECKS', 'waitForChecks', parseBool],
-  ['AFK_MERGE_TIMEOUT_SEC', 'mergeTimeoutSec', Number],
-]
-
-/** 布尔 env 解析：'true'/'false' 转布尔，坏值原样透传交给 schema 拦截 */
-function parseBool(v: string): unknown {
-  if (v === 'true') return true
-  if (v === 'false') return false
-  return v
-}
-
 /** 配置 schema：.strict() 拒绝未知键；缺省键回落默认值；可选键不要求 */
 const schema = z
   .object({
@@ -124,6 +141,10 @@ const schema = z
     autoMerge: z.boolean().default(DEFAULT_CONFIG.autoMerge),
     mergedLabel: z.string().default(DEFAULT_CONFIG.mergedLabel),
     reviewerModel: z.string().optional(),
+    sandbox: z.boolean().default(DEFAULT_CONFIG.sandbox),
+    sandboxEnv: z.array(z.string()).default([...DEFAULT_CONFIG.sandboxEnv]),
+    sandboxMemory: z.string().min(1).optional(),
+    sandboxCpus: z.number().int().min(1).optional(),
     maxReviewRounds: z.number().int().min(1).default(DEFAULT_CONFIG.maxReviewRounds),
     conflictTries: z.number().int().min(1).default(DEFAULT_CONFIG.conflictTries),
     waitForChecks: z.boolean().default(DEFAULT_CONFIG.waitForChecks),
@@ -131,20 +152,9 @@ const schema = z
   })
   .strict()
 
-/** 收集 AFK_* 环境变量覆盖（空串/空白视为未设置） */
-function envOverrides(): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
-  for (const [envKey, key, parse] of ENV_MAP) {
-    const raw = process.env[envKey]
-    if (raw === undefined || raw.trim() === '') continue
-    out[key] = parse(raw)
-  }
-  return out
-}
-
 /**
- * 加载项目配置：读 <cwd>/.pi/afk/config.json（必须存在，缺省键回落内置默认值），
- * 环境变量 AFK_* 作为覆盖层（env > config.json > 内置默认）。
+ * 加载项目配置：读 <cwd>/.pi/afk/config.json（必须存在，缺省键回落内置默认值）。
+ * 配置只读 config.json；环境变量仅用于秘密（模型 API key / GH_TOKEN），不进配置。
  * 缺失 / 坏 JSON / 校验失败均抛干净 Error（含 afk init 提示）。
  */
 export function loadConfig(cwd: string = process.cwd()): Config {
@@ -164,7 +174,7 @@ export function loadConfig(cwd: string = process.cwd()): Config {
     throw new Error(`配置格式错误 ${file}: 顶层必须是 JSON 对象（{} 也合法，缺省键回落默认值）`)
   }
   try {
-    return schema.parse({ ...raw, ...envOverrides() })
+    return schema.parse(raw)
   } catch (error) {
     if (error instanceof ZodError) {
       const details = error.issues

@@ -1,11 +1,12 @@
 import { execSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { loadConfig } from '../src/config.js'
 import { runInit } from '../src/init.js'
+import { sandboxImageTag } from '../src/sandbox.js'
 
 // execa 保持真实（init.ts 的 git 探测走 execaSync），只 mock 异步 execa（issues.ts 的 gh 调用）
 vi.mock('execa', async (importOriginal) => ({
@@ -36,8 +37,12 @@ function tempGitRepo(): string {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  // gh 全部成功：label list 空 → 4 个全建
-  mockExeca.mockResolvedValue({ stdout: '' })
+  // 按命令分发：pi --version 固定版本 / docker build 成功 / gh 全部成功
+  mockExeca.mockImplementation(async (cmd: string) => {
+    if (cmd === 'pi') return { stdout: '0.5.2', exitCode: 0 }
+    if (cmd === 'docker') return { stdout: '', stderr: '', exitCode: 0 }
+    return { stdout: '' } // gh: label list 空 → 4 个全建
+  })
 })
 
 afterEach(() => {
@@ -186,10 +191,109 @@ describe('runInit 初始化', () => {
 
   it('label 创建失败 → 初始化不完整，抛错并带指引', async () => {
     const cwd = tempGitRepo()
-    mockExeca
-      .mockResolvedValueOnce({ stdout: '' }) // label list
-      .mockRejectedValueOnce(new Error('gh: Permission denied')) // agent:todo 创建失败
+    mockExeca.mockImplementation(async (cmd: string, args: string[] = []) => {
+      if (cmd === 'pi') return { stdout: '0.5.2', exitCode: 0 }
+      if (cmd === 'docker') return { stdout: '', stderr: '', exitCode: 0 }
+      if (args[0] === 'label' && args[1] === 'create') throw new Error('gh: Permission denied')
+      return { stdout: '' }
+    })
 
     await expect(runInit(cwd)).rejects.toThrow(/agent:todo[\s\S]*写权限/)
+  })
+})
+
+describe('runInit 沙箱镜像', () => {
+  it('生成 Dockerfile：pi 版本写死（宿主探测）+ node 基底 + 包管理器 + ENTRYPOINT', async () => {
+    const cwd = tempGitRepo()
+
+    const result = await runInit(cwd)
+
+    expect(result.dockerfile).toBe('created')
+    expect(result.imageTag).toMatch(/^afk-sandbox-[0-9a-f]{16}$/)
+    const raw = readFileSync(join(cwd, '.pi', 'afk', 'Dockerfile'), 'utf8')
+    expect(raw).toContain('FROM node:24-bookworm-slim')
+    expect(raw).toContain('@earendil-works/pi-coding-agent@0.5.2') // 写死宿主 pi 版本
+    expect(raw).toContain('pnpm && npm install -g --ignore-scripts --force yarn')
+    expect(raw).toContain('ENTRYPOINT ["pi"]')
+    // 构建调用：内容寻址 tag + Dockerfile 所在目录作 context（避免上传整个仓库）
+    expect(mockExeca).toHaveBeenCalledWith(
+      'docker',
+      [
+        'build',
+        '-t',
+        result.imageTag,
+        '-f',
+        join(cwd, '.pi', 'afk', 'Dockerfile'),
+        join(cwd, '.pi', 'afk'),
+      ],
+      { reject: false },
+    )
+  })
+
+  it('Dockerfile 已存在且内容一致 → unchanged（幂等）', async () => {
+    const cwd = tempGitRepo()
+    await runInit(cwd)
+    const before = readFileSync(join(cwd, '.pi', 'afk', 'Dockerfile'), 'utf8')
+
+    const result = await runInit(cwd, { force: true }) // --force 跳过 config 已存在
+
+    expect(result.dockerfile).toBe('unchanged')
+    expect(readFileSync(join(cwd, '.pi', 'afk', 'Dockerfile'), 'utf8')).toBe(before)
+    expect(result.imageTag).toBe(sandboxImageTag(cwd))
+  })
+
+  it('Dockerfile 被人为修改 → replaced 重写回模板，raw tag 不同于被改内容的 tag', async () => {
+    const cwd = tempGitRepo()
+    await runInit(cwd)
+    const templateTag = sandboxImageTag(cwd)
+    writeFileSync(join(cwd, '.pi', 'afk', 'Dockerfile'), 'FROM node:22-bookworm-slim\n')
+    const modifiedTag = sandboxImageTag(cwd)
+    expect(modifiedTag).not.toBe(templateTag)
+
+    const result = await runInit(cwd, { force: true })
+
+    expect(result.dockerfile).toBe('replaced')
+    expect(result.imageTag).not.toBe(modifiedTag) // 被改内容已重写，旧 tag 作废
+    expect(result.imageTag).toBe(templateTag) // 重写回标准模板 → tag 回到模板寻址
+  })
+
+  it('宿主 pi --version 探测失败 → 报错（沙箱镜像必须版本确定）', async () => {
+    const cwd = tempGitRepo()
+    mockExeca.mockImplementation(async (cmd: string) => {
+      if (cmd === 'pi') return { stdout: '', exitCode: 1 }
+      if (cmd === 'docker') return { stdout: '', stderr: '', exitCode: 0 }
+      return { stdout: '' }
+    })
+
+    await expect(runInit(cwd)).rejects.toThrow(/pi --version/)
+  })
+
+  it('docker build 失败 → 文件已落盘、报错并提示重跑；不继续写 config', async () => {
+    const cwd = tempGitRepo()
+    mockExeca.mockImplementation(async (cmd: string) => {
+      if (cmd === 'pi') return { stdout: '0.5.2', exitCode: 0 }
+      if (cmd === 'docker') return { stdout: '', stderr: 'network error', exitCode: 1 }
+      return { stdout: '' }
+    })
+
+    await expect(runInit(cwd)).rejects.toThrow(/镜像构建失败/)
+    // Dockerfile 已生成（可修复后重跑），config.json 未写（重跑无 —force 冲突）
+    expect(existsSync(join(cwd, '.pi', 'afk', 'Dockerfile'))).toBe(true)
+    expect(existsSync(join(cwd, '.pi', 'afk', 'config.json'))).toBe(false)
+  })
+
+  it('docker 不可用（spawn ENOENT）→ 报错提示 docker 或 --local', async () => {
+    const cwd = tempGitRepo()
+    mockExeca.mockImplementation(async (cmd: string) => {
+      if (cmd === 'pi') return { stdout: '0.5.2', exitCode: 0 }
+      if (cmd === 'docker') {
+        const err = new Error('spawn docker ENOENT') as Error & { code?: string }
+        err.code = 'ENOENT'
+        throw err
+      }
+      return { stdout: '' }
+    })
+
+    await expect(runInit(cwd)).rejects.toThrow(/docker 不可用/)
   })
 })

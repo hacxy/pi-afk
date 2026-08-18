@@ -16,7 +16,7 @@
    - REFACTOR：清理，保持测试绿
    - 验收标准即 spec，由你自主决策；重要决策记录在提交信息中
    - 不要为了可测试性随意抽取新函数/新接口（会制造 spaghetti tests）
-4. **验证** —— 依赖已由编排层在 worktree 里安装好（宿主侧），**无需自行 install**。提交前运行验证命令，修复所有失败再继续：
+4. **验证** —— 依赖已由编排层在 worktree 里安装好，**无需自行 install**。提交前运行验证命令，修复所有失败再继续：
    - `pnpm run typecheck`
    - `pnpm run test`
    - `pnpm run lint`

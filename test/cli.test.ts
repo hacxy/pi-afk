@@ -1,6 +1,19 @@
-import { execa } from 'execa'
+import { execa, execaSync } from 'execa'
 import { resolve } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+/** docker 是否可用（冒烟 init 测试的前置条件：真实构建镜像需要 daemon+网络） */
+function dockerAvailable(): boolean {
+  try {
+    const out = execaSync('docker', ['version', '--format', '{{.Server.Version}}'], {
+      reject: false,
+      timeout: 5000,
+    })
+    return out.exitCode === 0
+  } catch {
+    return false
+  }
+}
 
 vi.mock('../src/index.js', () => ({ runAfk: vi.fn() }))
 vi.mock('../src/log.js', () => ({ log: vi.fn(), logError: vi.fn() }))
@@ -107,7 +120,7 @@ describe('runAfkLoop（默认命令 action）', () => {
   it('身份缺失 → 启动即拦：logError + exitCode 1，不跑 loop', async () => {
     vi.mocked(createGitIdentityResolver).mockImplementationOnce(() => {
       throw new Error(
-        '无法确定 git 提交身份：请用任一方式设置——① git config --global user.name/user.email；② 环境变量 AFK_GIT_AUTHOR/AFK_GIT_EMAIL；③ config.json 的 gitAuthor/gitEmail',
+        '无法确定 git 提交身份：请用任一方式设置——① config.json 的 gitAuthor/gitEmail；② git config --global user.name/user.email',
       )
     })
 
@@ -152,38 +165,43 @@ describe('cac CLI 冒烟', () => {
     expect(stdout).toContain('0.1.0')
   })
 
-  it('init 命令：在 git 仓库内生成 config.json + 幂等补建 label 且 exit 0', async () => {
-    const { execSync } = await import('node:child_process')
-    const { mkdirSync, mkdtempSync, existsSync, writeFileSync } = await import('node:fs')
-    const { tmpdir } = await import('node:os')
-    const { delimiter, join } = await import('node:path')
-    const dir = mkdtempSync(join(tmpdir(), 'afk-cli-init-'))
-    execSync('git init -q', {
-      cwd: dir,
-      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
-    })
-    // 假 gh shim：模拟 label list（无现有）与 label create（成功），隔离真实 GitHub
-    const bin = join(dir, '.bin')
-    mkdirSync(bin, { recursive: true })
-    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n')
-    execSync('chmod +x .bin/gh', { cwd: dir })
-    // tsx 二进制与 cli 入口都用绝对路径（tmp cwd 下无法解析裸 'tsx' 包）
-    const tsx = join(process.cwd(), 'node_modules', '.bin', 'tsx')
-    const cli = resolve('src/cli.ts')
+  // 真实 docker 构建需要 daemon + 网络（拉基础镜像/npm 包）；集成逻辑已由 init.test.ts 单测覆盖，
+  // 无 docker 的环境（CI）跳过本条冒烟，避免把环境性失败当成回归
+  it.skipIf(!dockerAvailable())(
+    'init 命令：在 git 仓库内生成 config.json + 构建沙箱镜像 + 补建 label 且 exit 0',
+    async () => {
+      const { execSync } = await import('node:child_process')
+      const { mkdirSync, mkdtempSync, existsSync, writeFileSync } = await import('node:fs')
+      const { tmpdir } = await import('node:os')
+      const { delimiter, join } = await import('node:path')
+      const dir = mkdtempSync(join(tmpdir(), 'afk-cli-init-'))
+      execSync('git init -q', {
+        cwd: dir,
+        env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+      })
+      // 假 gh shim：模拟 label list（无现有）与 label create（成功），隔离真实 GitHub
+      const bin = join(dir, '.bin')
+      mkdirSync(bin, { recursive: true })
+      writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n')
+      execSync('chmod +x .bin/gh', { cwd: dir })
+      // tsx 二进制与 cli 入口都用绝对路径（tmp cwd 下无法解析裸 'tsx' 包）
+      const tsx = join(process.cwd(), 'node_modules', '.bin', 'tsx')
+      const cli = resolve('src/cli.ts')
 
-    const stdout = execSync(`"${tsx}" "${cli}" init`, {
-      cwd: dir,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: `${bin}${delimiter}${process.env.PATH}`,
-        GIT_CONFIG_GLOBAL: '/dev/null',
-      },
-    })
+      const stdout = execSync(`"${tsx}" "${cli}" init`, {
+        cwd: dir,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}${delimiter}${process.env.PATH}`,
+          GIT_CONFIG_GLOBAL: '/dev/null',
+        },
+      })
 
-    expect(stdout).toContain('已生成配置')
-    expect(stdout).toContain('已补建 agent:todo')
-    expect(existsSync(join(dir, '.pi', 'afk', 'config.json'))).toBe(true)
-    execSync(`rm -rf "${dir}"`)
-  })
+      expect(stdout).toContain('已生成配置')
+      expect(stdout).toContain('已补建 agent:todo')
+      expect(existsSync(join(dir, '.pi', 'afk', 'config.json'))).toBe(true)
+      execSync(`rm -rf "${dir}"`)
+    },
+  )
 })
